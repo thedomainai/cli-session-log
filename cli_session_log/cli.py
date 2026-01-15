@@ -2,49 +2,11 @@
 """CLI interface for session management."""
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
+from .config import get_config
 from .session import SessionManager
-
-
-# Default sessions directory
-DEFAULT_SESSIONS_DIR = Path.home() / "workspace/obsidian_vault/docs/01_resource/sessions"
-
-
-def get_config_path() -> Path:
-    """Get config file path."""
-    return Path.home() / ".config" / "cli-session-log" / "config.yaml"
-
-
-def load_config() -> dict:
-    """Load configuration from file."""
-    config_path = get_config_path()
-    if config_path.exists():
-        try:
-            import yaml
-            with open(config_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            pass
-    return {}
-
-
-def get_sessions_dir() -> Path:
-    """Get sessions directory from config, environment, or default."""
-    # 1. Environment variable (highest priority)
-    env_dir = os.environ.get("SESSION_LOG_DIR")
-    if env_dir:
-        return Path(env_dir)
-
-    # 2. Config file
-    config = load_config()
-    if config.get("sessions_dir"):
-        return Path(config["sessions_dir"]).expanduser()
-
-    # 3. Default
-    return DEFAULT_SESSIONS_DIR
 
 
 def cmd_new(args, manager: SessionManager):
@@ -197,7 +159,8 @@ def main():
     args = parser.parse_args()
 
     # Initialize manager
-    sessions_dir = args.dir or get_sessions_dir()
+    config = get_config()
+    sessions_dir = args.dir or config.sessions_dir
     manager = SessionManager(sessions_dir)
 
     # Dispatch commands

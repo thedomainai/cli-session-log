@@ -23,8 +23,6 @@ Usage in ~/.claude/settings.json:
 }
 """
 
-import json
-import os
 import subprocess
 import sys
 from datetime import datetime
@@ -33,20 +31,20 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from cli_session_log.config import get_config
+from cli_session_log.extractors import ClaudeExtractor, GeminiExtractor
 from cli_session_log.session import SessionManager
 
-SESSIONS_DIR = Path.home() / "workspace/obsidian_vault/docs/01_resource/sessions"
-STATE_FILE = Path.home() / ".config/cli-session-log/current_session.txt"
-AI_TYPE_FILE = Path.home() / ".config/cli-session-log/current_ai_type.txt"
-CLAUDE_SESSION_FILE = Path.home() / ".config/cli-session-log/claude_session_id.txt"
-TASK_EXTRACTOR = Path.home() / "workspace/obsidian_vault/docs/03_project/00_thedomainai/task-picker-agent/task_extractor.py"
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude/projects"
-GEMINI_TMP_DIR = Path.home() / ".gemini/tmp"
+# Get configuration
+config = get_config()
+
+# State file for Claude session ID (not in config as it's hook-specific)
+CLAUDE_SESSION_FILE = config.CONFIG_DIR / "claude_session_id.txt"
 
 
 def ensure_state_dir():
     """Ensure state directory exists."""
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.ensure_config_dir()
 
 
 def get_claude_session_id() -> str | None:
@@ -67,8 +65,8 @@ def set_claude_session_id(session_id: str | None):
 
 def get_ai_type() -> str | None:
     """Get current AI type (claude/gemini)."""
-    if AI_TYPE_FILE.exists():
-        return AI_TYPE_FILE.read_text().strip() or None
+    if config.AI_TYPE_FILE.exists():
+        return config.AI_TYPE_FILE.read_text().strip() or None
     return None
 
 
@@ -76,95 +74,15 @@ def set_ai_type(ai_type: str | None):
     """Set current AI type."""
     ensure_state_dir()
     if ai_type:
-        AI_TYPE_FILE.write_text(ai_type)
-    elif AI_TYPE_FILE.exists():
-        AI_TYPE_FILE.unlink()
-
-
-def find_latest_claude_session(cwd: str | None = None) -> Path | None:
-    """Find the latest Claude Code session file for given directory."""
-    if not CLAUDE_PROJECTS_DIR.exists():
-        return None
-
-    # Convert cwd to Claude's directory naming format
-    if cwd:
-        dir_name = cwd.replace("/", "-")
-        if dir_name.startswith("-"):
-            dir_name = dir_name[1:]
-        project_dir = CLAUDE_PROJECTS_DIR / dir_name
-    else:
-        # Find most recently modified project directory
-        project_dirs = [d for d in CLAUDE_PROJECTS_DIR.iterdir() if d.is_dir()]
-        if not project_dirs:
-            return None
-        project_dir = max(project_dirs, key=lambda d: d.stat().st_mtime)
-
-    if not project_dir.exists():
-        return None
-
-    # Find most recent .jsonl file
-    jsonl_files = list(project_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        return None
-
-    return max(jsonl_files, key=lambda f: f.stat().st_mtime)
-
-
-def extract_conversation_from_jsonl(jsonl_path: Path, limit: int = 50) -> list[dict]:
-    """Extract conversation messages from Claude Code JSONL file."""
-    messages = []
-
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-
-                    # User message
-                    if entry.get("type") == "user" and "message" in entry:
-                        msg = entry["message"]
-                        if msg.get("role") == "user" and msg.get("content"):
-                            content = msg["content"]
-                            if isinstance(content, str):
-                                messages.append({
-                                    "role": "User",
-                                    "content": content[:1000],  # Truncate long messages
-                                    "timestamp": entry.get("timestamp", "")
-                                })
-
-                    # Assistant message
-                    elif entry.get("type") == "assistant" or (
-                        "message" in entry and entry.get("message", {}).get("role") == "assistant"
-                    ):
-                        msg = entry.get("message", entry)
-                        content_parts = msg.get("content", [])
-                        if isinstance(content_parts, list):
-                            text_parts = [
-                                p.get("text", "")
-                                for p in content_parts
-                                if p.get("type") == "text"
-                            ]
-                            if text_parts:
-                                messages.append({
-                                    "role": "AI",
-                                    "content": " ".join(text_parts)[:1000],
-                                    "timestamp": entry.get("timestamp", "")
-                                })
-
-                except json.JSONDecodeError:
-                    continue
-
-    except Exception as e:
-        print(f"Error reading JSONL: {e}", file=sys.stderr)
-
-    # Return last N messages
-    return messages[-limit:]
+        config.AI_TYPE_FILE.write_text(ai_type)
+    elif config.AI_TYPE_FILE.exists():
+        config.AI_TYPE_FILE.unlink()
 
 
 def get_current_session_id() -> str | None:
     """Get current session ID from state file."""
-    if STATE_FILE.exists():
-        return STATE_FILE.read_text().strip() or None
+    if config.STATE_FILE.exists():
+        return config.STATE_FILE.read_text().strip() or None
     return None
 
 
@@ -172,14 +90,14 @@ def set_current_session_id(session_id: str | None):
     """Set current session ID in state file."""
     ensure_state_dir()
     if session_id:
-        STATE_FILE.write_text(session_id)
-    elif STATE_FILE.exists():
-        STATE_FILE.unlink()
+        config.STATE_FILE.write_text(session_id)
+    elif config.STATE_FILE.exists():
+        config.STATE_FILE.unlink()
 
 
 def cmd_start(title: str | None = None, ai_type: str | None = None):
     """Start a new session."""
-    manager = SessionManager(SESSIONS_DIR)
+    manager = SessionManager(config.sessions_dir)
 
     # Check if there's already an active session
     current_id = get_current_session_id()
@@ -209,13 +127,13 @@ def cmd_start(title: str | None = None, ai_type: str | None = None):
 
 def extract_tasks_from_session(session_id: str):
     """Extract tasks from session log using task-picker-agent."""
-    if not TASK_EXTRACTOR.exists():
-        print(f"Task extractor not found: {TASK_EXTRACTOR}", file=sys.stderr)
+    if not config.task_extractor.exists():
+        print(f"Task extractor not found: {config.task_extractor}", file=sys.stderr)
         return
 
     try:
         result = subprocess.run(
-            ["python3", str(TASK_EXTRACTOR), "--session", session_id],
+            ["python3", str(config.task_extractor), "--session", session_id],
             capture_output=True,
             text=True
         )
@@ -227,77 +145,17 @@ def extract_tasks_from_session(session_id: str):
         print(f"Error extracting tasks: {e}", file=sys.stderr)
 
 
-def find_latest_gemini_session() -> Path | None:
-    """Find the latest Gemini session file."""
-    if not GEMINI_TMP_DIR.exists():
-        return None
-
-    # Find most recently modified project directory
-    project_dirs = [
-        d for d in GEMINI_TMP_DIR.iterdir()
-        if d.is_dir() and (d / "chats").exists()
-    ]
-    if not project_dirs:
-        return None
-
-    # Find the latest session file across all projects
-    latest_file = None
-    latest_mtime = 0
-
-    for project_dir in project_dirs:
-        chats_dir = project_dir / "chats"
-        for session_file in chats_dir.glob("session-*.json"):
-            mtime = session_file.stat().st_mtime
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-                latest_file = session_file
-
-    return latest_file
-
-
-def extract_conversation_from_gemini(session_path: Path, limit: int = 50) -> list[dict]:
-    """Extract conversation messages from Gemini session file."""
-    messages = []
-
-    try:
-        with open(session_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        for msg in data.get("messages", []):
-            msg_type = msg.get("type", "")
-            content = msg.get("content", "")
-
-            if not content or not isinstance(content, str):
-                continue
-
-            if msg_type == "user":
-                messages.append({
-                    "role": "User",
-                    "content": content[:1000],
-                    "timestamp": msg.get("timestamp", "")
-                })
-            elif msg_type == "model":
-                messages.append({
-                    "role": "AI",
-                    "content": content[:1000],
-                    "timestamp": msg.get("timestamp", "")
-                })
-
-    except Exception as e:
-        print(f"Error reading Gemini session: {e}", file=sys.stderr)
-
-    return messages[-limit:]
-
-
 def import_gemini_conversation(manager: SessionManager, session_id: str):
     """Import conversation from Gemini history."""
-    session_path = find_latest_gemini_session()
+    extractor = GeminiExtractor(config.gemini_tmp_dir)
+    session_path = extractor.find_latest_session()
+
     if not session_path:
         print("No Gemini session found", file=sys.stderr)
         return
 
     print(f"Importing conversation from: {session_path.name}")
-    messages = extract_conversation_from_gemini(session_path)
+    messages = extractor.extract_messages(session_path)
 
     if not messages:
         print("No messages found in session")
@@ -305,7 +163,7 @@ def import_gemini_conversation(manager: SessionManager, session_id: str):
 
     for msg in messages:
         try:
-            manager.add_log(session_id, msg["content"], msg["role"])
+            manager.add_log(session_id, msg.content, msg.role)
         except Exception as e:
             print(f"Error adding log: {e}", file=sys.stderr)
 
@@ -314,13 +172,15 @@ def import_gemini_conversation(manager: SessionManager, session_id: str):
 
 def import_claude_conversation(manager: SessionManager, session_id: str):
     """Import conversation from Claude Code history."""
-    jsonl_path = find_latest_claude_session()
-    if not jsonl_path:
+    extractor = ClaudeExtractor(config.claude_projects_dir)
+    session_path = extractor.find_latest_session()
+
+    if not session_path:
         print("No Claude Code session found", file=sys.stderr)
         return
 
-    print(f"Importing conversation from: {jsonl_path.name}")
-    messages = extract_conversation_from_jsonl(jsonl_path)
+    print(f"Importing conversation from: {session_path.name}")
+    messages = extractor.extract_messages(session_path)
 
     if not messages:
         print("No messages found in session")
@@ -328,7 +188,7 @@ def import_claude_conversation(manager: SessionManager, session_id: str):
 
     for msg in messages:
         try:
-            manager.add_log(session_id, msg["content"], msg["role"])
+            manager.add_log(session_id, msg.content, msg.role)
         except Exception as e:
             print(f"Error adding log: {e}", file=sys.stderr)
 
@@ -337,7 +197,7 @@ def import_claude_conversation(manager: SessionManager, session_id: str):
 
 def cmd_stop():
     """Stop the current session, import conversation, and extract tasks."""
-    manager = SessionManager(SESSIONS_DIR)
+    manager = SessionManager(config.sessions_dir)
 
     current_id = get_current_session_id()
     if not current_id:
@@ -371,7 +231,7 @@ def cmd_stop():
 
 def cmd_log(role: str, message: str):
     """Add log entry to current session."""
-    manager = SessionManager(SESSIONS_DIR)
+    manager = SessionManager(config.sessions_dir)
 
     current_id = get_current_session_id()
     if not current_id:
