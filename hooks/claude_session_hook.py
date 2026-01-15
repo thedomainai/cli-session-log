@@ -25,6 +25,7 @@ Usage in ~/.claude/settings.json:
 
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ from cli_session_log.session import SessionManager
 
 SESSIONS_DIR = Path.home() / "workspace/obsidian_vault/docs/01_resource/sessions"
 STATE_FILE = Path.home() / ".config/cli-session-log/current_session.txt"
+TASK_EXTRACTOR = Path.home() / "workspace/obsidian_vault/docs/03_project/00_thedomainai/task-picker-agent/task_extractor.py"
 
 
 def ensure_state_dir():
@@ -78,8 +80,28 @@ def cmd_start(title: str | None = None):
     return session_id
 
 
+def extract_tasks_from_session(session_id: str):
+    """Extract tasks from session log using task-picker-agent."""
+    if not TASK_EXTRACTOR.exists():
+        print(f"Task extractor not found: {TASK_EXTRACTOR}", file=sys.stderr)
+        return
+
+    try:
+        result = subprocess.run(
+            ["python3", str(TASK_EXTRACTOR), "--session", session_id],
+            capture_output=True,
+            text=True
+        )
+        if result.stdout:
+            print(result.stdout.strip())
+        if result.stderr:
+            print(result.stderr.strip(), file=sys.stderr)
+    except Exception as e:
+        print(f"Error extracting tasks: {e}", file=sys.stderr)
+
+
 def cmd_stop():
-    """Stop the current session."""
+    """Stop the current session and extract tasks."""
     manager = SessionManager(SESSIONS_DIR)
 
     current_id = get_current_session_id()
@@ -90,6 +112,11 @@ def cmd_stop():
     try:
         manager.set_status(current_id, "completed")
         print(f"Session completed: {current_id}")
+
+        # Extract tasks from session log
+        print("Extracting tasks from session...")
+        extract_tasks_from_session(current_id)
+
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
     finally:
