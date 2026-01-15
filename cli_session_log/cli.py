@@ -149,6 +149,51 @@ def cmd_close(args, manager: SessionManager):
         sys.exit(1)
 
 
+def cmd_stats(args, manager: SessionManager):
+    """Display session statistics."""
+    sessions = manager.list_sessions(None)
+
+    if not sessions:
+        print("No sessions found.")
+        return
+
+    # Count by status
+    status_counts = {"active": 0, "paused": 0, "completed": 0}
+    total_messages = {"user": 0, "ai": 0}
+
+    for s in sessions:
+        status = s.get("status", "active")
+        if status in status_counts:
+            status_counts[status] += 1
+
+        # Count messages if available
+        if "user_messages" in s:
+            total_messages["user"] += s["user_messages"]
+        if "ai_messages" in s:
+            total_messages["ai"] += s["ai_messages"]
+
+    total = len(sessions)
+
+    print("=" * 40)
+    print("       SESSION STATISTICS")
+    print("=" * 40)
+    print()
+    print(f"  Total Sessions:    {total}")
+    print()
+    print("  By Status:")
+    print(f"    Active:          {status_counts['active']}")
+    print(f"    Paused:          {status_counts['paused']}")
+    print(f"    Completed:       {status_counts['completed']}")
+    print()
+    if total_messages["user"] > 0 or total_messages["ai"] > 0:
+        print("  Messages:")
+        print(f"    User:            {total_messages['user']}")
+        print(f"    AI:              {total_messages['ai']}")
+        print(f"    Total:           {total_messages['user'] + total_messages['ai']}")
+        print()
+    print("=" * 40)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="session-log",
@@ -194,6 +239,9 @@ def main():
     p_close = subparsers.add_parser("close", help="Close a session")
     p_close.add_argument("id", help="Session ID")
 
+    # stats
+    subparsers.add_parser("stats", help="Display session statistics")
+
     args = parser.parse_args()
 
     # Initialize manager
@@ -209,6 +257,7 @@ def main():
         "task": cmd_task,
         "status": cmd_status,
         "close": cmd_close,
+        "stats": cmd_stats,
     }
 
     commands[args.command](args, manager)
