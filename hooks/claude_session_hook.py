@@ -37,9 +37,11 @@ from cli_session_log.session import SessionManager
 
 SESSIONS_DIR = Path.home() / "workspace/obsidian_vault/docs/01_resource/sessions"
 STATE_FILE = Path.home() / ".config/cli-session-log/current_session.txt"
+AI_TYPE_FILE = Path.home() / ".config/cli-session-log/current_ai_type.txt"
 CLAUDE_SESSION_FILE = Path.home() / ".config/cli-session-log/claude_session_id.txt"
 TASK_EXTRACTOR = Path.home() / "workspace/obsidian_vault/docs/03_project/00_thedomainai/task-picker-agent/task_extractor.py"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude/projects"
+GEMINI_TMP_DIR = Path.home() / ".gemini/tmp"
 
 
 def ensure_state_dir():
@@ -61,6 +63,22 @@ def set_claude_session_id(session_id: str | None):
         CLAUDE_SESSION_FILE.write_text(session_id)
     elif CLAUDE_SESSION_FILE.exists():
         CLAUDE_SESSION_FILE.unlink()
+
+
+def get_ai_type() -> str | None:
+    """Get current AI type (claude/gemini)."""
+    if AI_TYPE_FILE.exists():
+        return AI_TYPE_FILE.read_text().strip() or None
+    return None
+
+
+def set_ai_type(ai_type: str | None):
+    """Set current AI type."""
+    ensure_state_dir()
+    if ai_type:
+        AI_TYPE_FILE.write_text(ai_type)
+    elif AI_TYPE_FILE.exists():
+        AI_TYPE_FILE.unlink()
 
 
 def find_latest_claude_session(cwd: str | None = None) -> Path | None:
@@ -159,7 +177,7 @@ def set_current_session_id(session_id: str | None):
         STATE_FILE.unlink()
 
 
-def cmd_start(title: str | None = None):
+def cmd_start(title: str | None = None, ai_type: str | None = None):
     """Start a new session."""
     manager = SessionManager(SESSIONS_DIR)
 
@@ -169,12 +187,23 @@ def cmd_start(title: str | None = None):
         print(f"Session already active: {current_id}", file=sys.stderr)
         return current_id
 
+    # Detect AI type from title if not specified
+    if not ai_type and title:
+        title_lower = title.lower()
+        if "gemini" in title_lower:
+            ai_type = "gemini"
+        elif "claude" in title_lower:
+            ai_type = "claude"
+
+    ai_type = ai_type or "claude"  # Default to claude
+
     # Create new session
-    title = title or f"Claude Code Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     session_id, session_file = manager.create_session(title)
     set_current_session_id(session_id)
+    set_ai_type(ai_type)
 
-    print(f"Session started: {session_id}")
+    print(f"Session started: {session_id} ({ai_type})")
     return session_id
 
 
@@ -196,6 +225,91 @@ def extract_tasks_from_session(session_id: str):
             print(result.stderr.strip(), file=sys.stderr)
     except Exception as e:
         print(f"Error extracting tasks: {e}", file=sys.stderr)
+
+
+def find_latest_gemini_session() -> Path | None:
+    """Find the latest Gemini session file."""
+    if not GEMINI_TMP_DIR.exists():
+        return None
+
+    # Find most recently modified project directory
+    project_dirs = [
+        d for d in GEMINI_TMP_DIR.iterdir()
+        if d.is_dir() and (d / "chats").exists()
+    ]
+    if not project_dirs:
+        return None
+
+    # Find the latest session file across all projects
+    latest_file = None
+    latest_mtime = 0
+
+    for project_dir in project_dirs:
+        chats_dir = project_dir / "chats"
+        for session_file in chats_dir.glob("session-*.json"):
+            mtime = session_file.stat().st_mtime
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_file = session_file
+
+    return latest_file
+
+
+def extract_conversation_from_gemini(session_path: Path, limit: int = 50) -> list[dict]:
+    """Extract conversation messages from Gemini session file."""
+    messages = []
+
+    try:
+        with open(session_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for msg in data.get("messages", []):
+            msg_type = msg.get("type", "")
+            content = msg.get("content", "")
+
+            if not content or not isinstance(content, str):
+                continue
+
+            if msg_type == "user":
+                messages.append({
+                    "role": "User",
+                    "content": content[:1000],
+                    "timestamp": msg.get("timestamp", "")
+                })
+            elif msg_type == "model":
+                messages.append({
+                    "role": "AI",
+                    "content": content[:1000],
+                    "timestamp": msg.get("timestamp", "")
+                })
+
+    except Exception as e:
+        print(f"Error reading Gemini session: {e}", file=sys.stderr)
+
+    return messages[-limit:]
+
+
+def import_gemini_conversation(manager: SessionManager, session_id: str):
+    """Import conversation from Gemini history."""
+    session_path = find_latest_gemini_session()
+    if not session_path:
+        print("No Gemini session found", file=sys.stderr)
+        return
+
+    print(f"Importing conversation from: {session_path.name}")
+    messages = extract_conversation_from_gemini(session_path)
+
+    if not messages:
+        print("No messages found in session")
+        return
+
+    for msg in messages:
+        try:
+            manager.add_log(session_id, msg["content"], msg["role"])
+        except Exception as e:
+            print(f"Error adding log: {e}", file=sys.stderr)
+
+    print(f"Imported {len(messages)} messages")
 
 
 def import_claude_conversation(manager: SessionManager, session_id: str):
@@ -230,13 +344,19 @@ def cmd_stop():
         print("No active session", file=sys.stderr)
         return
 
+    ai_type = get_ai_type() or "claude"
+
     try:
-        # Import conversation from Claude Code
-        print("Importing conversation from Claude Code...")
-        import_claude_conversation(manager, current_id)
+        # Import conversation based on AI type
+        if ai_type == "gemini":
+            print("Importing conversation from Gemini...")
+            import_gemini_conversation(manager, current_id)
+        else:
+            print("Importing conversation from Claude Code...")
+            import_claude_conversation(manager, current_id)
 
         manager.set_status(current_id, "completed")
-        print(f"Session completed: {current_id}")
+        print(f"Session completed: {current_id} ({ai_type})")
 
         # Extract tasks from session log
         print("Extracting tasks from session...")
@@ -246,6 +366,7 @@ def cmd_stop():
         print(f"Error: {e}", file=sys.stderr)
     finally:
         set_current_session_id(None)
+        set_ai_type(None)
 
 
 def cmd_log(role: str, message: str):
