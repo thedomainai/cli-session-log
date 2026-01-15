@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[Claude Code] File modified - use /quick-commit when ready' >&2"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -C \"$(pwd)\" diff --quiet 2>/dev/null || echo '[Claude Code] Uncommitted changes detected. Consider using /quick-commit or /finish-task' >&2"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(gh:*)"
+    ]
+  }
+}
