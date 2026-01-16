@@ -32,8 +32,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli_session_log.config import get_config
+from cli_session_log.exceptions import ExtractorError, SessionNotFoundError, SessionWriteError
 from cli_session_log.extractors import ClaudeExtractor, GeminiExtractor
+from cli_session_log.logging_config import get_logger, setup_logging
 from cli_session_log.session import SessionManager
+
+# Setup logging for hook
+setup_logging()
+logger = get_logger("hook")
 
 # Get configuration
 config = get_config()
@@ -102,6 +108,7 @@ def cmd_start(title: str | None = None, ai_type: str | None = None):
     # Check if there's already an active session
     current_id = get_current_session_id()
     if current_id:
+        logger.warning("Session already active: %s", current_id)
         print(f"Session already active: {current_id}", file=sys.stderr)
         return current_id
 
@@ -117,12 +124,18 @@ def cmd_start(title: str | None = None, ai_type: str | None = None):
 
     # Create new session
     title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    session_id, session_file = manager.create_session(title)
-    set_current_session_id(session_id)
-    set_ai_type(ai_type)
 
-    print(f"Session started: {session_id} ({ai_type})")
-    return session_id
+    try:
+        session_id, session_file = manager.create_session(title)
+        set_current_session_id(session_id)
+        set_ai_type(ai_type)
+        logger.info("Started session: %s (%s)", session_id, ai_type)
+        print(f"Session started: {session_id} ({ai_type})")
+        return session_id
+    except SessionWriteError as e:
+        logger.error("Failed to create session: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return None
 
 
 def extract_tasks_from_session(session_id: str):
@@ -130,9 +143,11 @@ def extract_tasks_from_session(session_id: str):
     task_extractor = config.task_extractor
     if task_extractor is None:
         # Task extraction is optional - skip silently if not configured
+        logger.debug("Task extractor not configured, skipping")
         return
 
     if not task_extractor.exists():
+        logger.warning("Task extractor not found: %s", task_extractor)
         print(f"Task extractor not found: {task_extractor}", file=sys.stderr)
         return
 
@@ -147,57 +162,100 @@ def extract_tasks_from_session(session_id: str):
         if result.stderr:
             print(result.stderr.strip(), file=sys.stderr)
     except Exception as e:
+        logger.error("Error extracting tasks: %s", e)
         print(f"Error extracting tasks: {e}", file=sys.stderr)
 
 
-def import_gemini_conversation(manager: SessionManager, session_id: str):
-    """Import conversation from Gemini history."""
+def import_gemini_conversation(manager: SessionManager, session_id: str) -> int:
+    """Import conversation from Gemini history.
+
+    Returns:
+        Number of messages imported
+    """
     extractor = GeminiExtractor(config.gemini_tmp_dir)
-    session_path = extractor.find_latest_session()
 
-    if not session_path:
-        print("No Gemini session found", file=sys.stderr)
-        return
+    try:
+        session_path = extractor.find_latest_session()
+        if not session_path:
+            logger.info("No Gemini session found")
+            print("No Gemini session found", file=sys.stderr)
+            return 0
 
-    print(f"Importing conversation from: {session_path.name}")
-    messages = extractor.extract_messages(session_path)
+        print(f"Importing conversation from: {session_path.name}")
+        messages = extractor.extract_messages(session_path)
+
+    except ExtractorError as e:
+        logger.error("Failed to extract Gemini conversation: %s", e)
+        print(f"Error extracting conversation: {e}", file=sys.stderr)
+        return 0
 
     if not messages:
         print("No messages found in session")
-        return
+        return 0
+
+    imported = 0
+    skipped = 0
 
     for msg in messages:
         try:
-            manager.add_log(session_id, msg.content, msg.role)
-        except Exception as e:
+            # Use duplicate detection
+            if manager.add_log(session_id, msg.content, msg.role, check_duplicate=True):
+                imported += 1
+            else:
+                skipped += 1
+        except (SessionNotFoundError, SessionWriteError) as e:
+            logger.error("Error adding log: %s", e)
             print(f"Error adding log: {e}", file=sys.stderr)
 
-    print(f"Imported {len(messages)} messages")
+    logger.info("Imported %d messages, skipped %d duplicates", imported, skipped)
+    print(f"Imported {imported} messages" + (f", skipped {skipped} duplicates" if skipped else ""))
+    return imported
 
 
-def import_claude_conversation(manager: SessionManager, session_id: str):
-    """Import conversation from Claude Code history."""
+def import_claude_conversation(manager: SessionManager, session_id: str) -> int:
+    """Import conversation from Claude Code history.
+
+    Returns:
+        Number of messages imported
+    """
     extractor = ClaudeExtractor(config.claude_projects_dir)
-    session_path = extractor.find_latest_session()
 
-    if not session_path:
-        print("No Claude Code session found", file=sys.stderr)
-        return
+    try:
+        session_path = extractor.find_latest_session()
+        if not session_path:
+            logger.info("No Claude Code session found")
+            print("No Claude Code session found", file=sys.stderr)
+            return 0
 
-    print(f"Importing conversation from: {session_path.name}")
-    messages = extractor.extract_messages(session_path)
+        print(f"Importing conversation from: {session_path.name}")
+        messages = extractor.extract_messages(session_path)
+
+    except ExtractorError as e:
+        logger.error("Failed to extract Claude conversation: %s", e)
+        print(f"Error extracting conversation: {e}", file=sys.stderr)
+        return 0
 
     if not messages:
         print("No messages found in session")
-        return
+        return 0
+
+    imported = 0
+    skipped = 0
 
     for msg in messages:
         try:
-            manager.add_log(session_id, msg.content, msg.role)
-        except Exception as e:
+            # Use duplicate detection
+            if manager.add_log(session_id, msg.content, msg.role, check_duplicate=True):
+                imported += 1
+            else:
+                skipped += 1
+        except (SessionNotFoundError, SessionWriteError) as e:
+            logger.error("Error adding log: %s", e)
             print(f"Error adding log: {e}", file=sys.stderr)
 
-    print(f"Imported {len(messages)} messages")
+    logger.info("Imported %d messages, skipped %d duplicates", imported, skipped)
+    print(f"Imported {imported} messages" + (f", skipped {skipped} duplicates" if skipped else ""))
+    return imported
 
 
 def cmd_stop():
@@ -206,10 +264,12 @@ def cmd_stop():
 
     current_id = get_current_session_id()
     if not current_id:
+        logger.warning("No active session to stop")
         print("No active session", file=sys.stderr)
         return
 
     ai_type = get_ai_type() or "claude"
+    logger.info("Stopping session: %s (%s)", current_id, ai_type)
 
     try:
         # Import conversation based on AI type
@@ -221,13 +281,15 @@ def cmd_stop():
             import_claude_conversation(manager, current_id)
 
         manager.set_status(current_id, "completed")
+        logger.info("Session completed: %s", current_id)
         print(f"Session completed: {current_id} ({ai_type})")
 
         # Extract tasks from session log
         print("Extracting tasks from session...")
         extract_tasks_from_session(current_id)
 
-    except ValueError as e:
+    except (SessionNotFoundError, SessionWriteError) as e:
+        logger.error("Error stopping session: %s", e)
         print(f"Error: {e}", file=sys.stderr)
     finally:
         set_current_session_id(None)
@@ -240,13 +302,16 @@ def cmd_log(role: str, message: str):
 
     current_id = get_current_session_id()
     if not current_id:
+        logger.warning("No active session for log")
         print("No active session", file=sys.stderr)
         return
 
     try:
         manager.add_log(current_id, message, role)
+        logger.debug("Added %s log to session %s", role, current_id)
         print(f"Added {role} log")
-    except ValueError as e:
+    except (SessionNotFoundError, SessionWriteError) as e:
+        logger.error("Error adding log: %s", e)
         print(f"Error: {e}", file=sys.stderr)
 
 
@@ -266,6 +331,7 @@ def main():
         sys.exit(1)
 
     cmd = sys.argv[1]
+    logger.debug("Executing command: %s", cmd)
 
     if cmd == "start":
         title = sys.argv[2] if len(sys.argv) > 2 else None
@@ -280,6 +346,7 @@ def main():
     elif cmd == "current":
         cmd_current()
     else:
+        logger.error("Unknown command: %s", cmd)
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
 

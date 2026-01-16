@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..logging_config import get_logger
+
+logger = get_logger("extractors.base")
+
 
 @dataclass
 class Message:
@@ -16,6 +20,8 @@ class Message:
 
     def truncate(self, max_length: int = 1000) -> "Message":
         """Return a new Message with truncated content."""
+        if len(self.content) <= max_length:
+            return self
         return Message(
             role=self.role,
             content=self.content[:max_length],
@@ -33,6 +39,7 @@ class BaseExtractor(ABC):
             base_dir: Base directory where sessions are stored
         """
         self.base_dir = base_dir
+        logger.debug("Initialized %s with base_dir: %s", self.__class__.__name__, base_dir)
 
     @abstractmethod
     def find_latest_session(self) -> Optional[Path]:
@@ -67,5 +74,7 @@ class BaseExtractor(ABC):
         """
         session_path = self.find_latest_session()
         if session_path is None:
+            logger.info("No session found in %s", self.base_dir)
             return []
+        logger.debug("Extracting from latest session: %s", session_path)
         return self.extract_messages(session_path, limit)

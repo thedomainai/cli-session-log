@@ -1,11 +1,14 @@
 """Claude Code conversation extractor."""
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
+from ..exceptions import ExtractorError
+from ..logging_config import get_logger
 from .base import BaseExtractor, Message
+
+logger = get_logger("extractors.claude")
 
 
 class ClaudeExtractor(BaseExtractor):
@@ -21,6 +24,7 @@ class ClaudeExtractor(BaseExtractor):
             Path to the latest .jsonl session file
         """
         if not self.base_dir.exists():
+            logger.debug("Claude projects dir does not exist: %s", self.base_dir)
             return None
 
         if cwd:
@@ -33,18 +37,23 @@ class ClaudeExtractor(BaseExtractor):
             # Find most recently modified project directory
             project_dirs = [d for d in self.base_dir.iterdir() if d.is_dir()]
             if not project_dirs:
+                logger.debug("No project directories found in %s", self.base_dir)
                 return None
             project_dir = max(project_dirs, key=lambda d: d.stat().st_mtime)
 
         if not project_dir.exists():
+            logger.debug("Project directory does not exist: %s", project_dir)
             return None
 
         # Find most recent .jsonl file
         jsonl_files = list(project_dir.glob("*.jsonl"))
         if not jsonl_files:
+            logger.debug("No JSONL files found in %s", project_dir)
             return None
 
-        return max(jsonl_files, key=lambda f: f.stat().st_mtime)
+        latest = max(jsonl_files, key=lambda f: f.stat().st_mtime)
+        logger.debug("Found latest Claude session: %s", latest)
+        return latest
 
     def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
         """Extract messages from Claude Code JSONL file.
@@ -55,23 +64,44 @@ class ClaudeExtractor(BaseExtractor):
 
         Returns:
             List of Message objects (last N messages)
+
+        Raises:
+            ExtractorError: If file cannot be read or parsed
         """
         messages: list[Message] = []
+        errors_count = 0
 
         try:
             with open(session_path, "r", encoding="utf-8") as f:
-                for line in f:
+                for line_num, line in enumerate(f, 1):
                     try:
                         entry = json.loads(line.strip())
                         message = self._parse_entry(entry)
                         if message:
                             messages.append(message.truncate(1000))
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        errors_count += 1
+                        if errors_count <= 3:  # Log first few errors
+                            logger.debug(
+                                "JSON parse error at line %d in %s: %s",
+                                line_num, session_path.name, e
+                            )
                         continue
 
-        except Exception as e:
-            print(f"Error reading JSONL: {e}", file=sys.stderr)
+        except OSError as e:
+            logger.error("Failed to read Claude session file %s: %s", session_path, e)
+            raise ExtractorError(f"Failed to read file: {e}", source=str(session_path))
 
+        if errors_count > 0:
+            logger.warning(
+                "Encountered %d JSON parse errors in %s",
+                errors_count, session_path.name
+            )
+
+        logger.info(
+            "Extracted %d messages from Claude session %s",
+            len(messages), session_path.name
+        )
         return messages[-limit:]
 
     def _parse_entry(self, entry: dict) -> Optional[Message]:

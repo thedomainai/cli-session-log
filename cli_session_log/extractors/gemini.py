@@ -1,11 +1,14 @@
 """Gemini conversation extractor."""
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
+from ..exceptions import ExtractorError
+from ..logging_config import get_logger
 from .base import BaseExtractor, Message
+
+logger = get_logger("extractors.gemini")
 
 
 class GeminiExtractor(BaseExtractor):
@@ -18,6 +21,7 @@ class GeminiExtractor(BaseExtractor):
             Path to the latest session JSON file
         """
         if not self.base_dir.exists():
+            logger.debug("Gemini tmp dir does not exist: %s", self.base_dir)
             return None
 
         # Find project directories with chats subdirectory
@@ -26,6 +30,7 @@ class GeminiExtractor(BaseExtractor):
             if d.is_dir() and (d / "chats").exists()
         ]
         if not project_dirs:
+            logger.debug("No project directories with chats found in %s", self.base_dir)
             return None
 
         # Find the latest session file across all projects
@@ -35,11 +40,17 @@ class GeminiExtractor(BaseExtractor):
         for project_dir in project_dirs:
             chats_dir = project_dir / "chats"
             for session_file in chats_dir.glob("session-*.json"):
-                mtime = session_file.stat().st_mtime
-                if mtime > latest_mtime:
-                    latest_mtime = mtime
-                    latest_file = session_file
+                try:
+                    mtime = session_file.stat().st_mtime
+                    if mtime > latest_mtime:
+                        latest_mtime = mtime
+                        latest_file = session_file
+                except OSError as e:
+                    logger.debug("Failed to stat %s: %s", session_file, e)
+                    continue
 
+        if latest_file:
+            logger.debug("Found latest Gemini session: %s", latest_file)
         return latest_file
 
     def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
@@ -51,23 +62,36 @@ class GeminiExtractor(BaseExtractor):
 
         Returns:
             List of Message objects (last N messages)
+
+        Raises:
+            ExtractorError: If file cannot be read or parsed
         """
         messages: list[Message] = []
 
         try:
             with open(session_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
-            for msg in data.get("messages", []):
-                message = self._parse_message(msg)
-                if message:
-                    messages.append(message.truncate(1000))
-
         except json.JSONDecodeError as e:
-            print(f"Error parsing Gemini session JSON: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"Error reading Gemini session: {e}", file=sys.stderr)
+            logger.error("Failed to parse Gemini session JSON %s: %s", session_path, e)
+            raise ExtractorError(f"Invalid JSON: {e}", source=str(session_path))
+        except OSError as e:
+            logger.error("Failed to read Gemini session file %s: %s", session_path, e)
+            raise ExtractorError(f"Failed to read file: {e}", source=str(session_path))
 
+        raw_messages = data.get("messages", [])
+        if not isinstance(raw_messages, list):
+            logger.warning("Unexpected messages format in %s", session_path)
+            return []
+
+        for msg in raw_messages:
+            message = self._parse_message(msg)
+            if message:
+                messages.append(message.truncate(1000))
+
+        logger.info(
+            "Extracted %d messages from Gemini session %s",
+            len(messages), session_path.name
+        )
         return messages[-limit:]
 
     def _parse_message(self, msg: dict) -> Optional[Message]:
