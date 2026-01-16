@@ -13,8 +13,8 @@ except ImportError:
 class Config:
     """Application configuration."""
 
-    # Default paths
-    DEFAULT_SESSIONS_DIR = Path.home() / "workspace/obsidian_vault/docs/01_resource/sessions"
+    # Default paths (XDG Base Directory compliant)
+    DEFAULT_SESSIONS_DIR = Path.home() / ".local" / "share" / "cli-session-log" / "sessions"
     CONFIG_DIR = Path.home() / ".config" / "cli-session-log"
     CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
@@ -22,12 +22,12 @@ class Config:
     STATE_FILE = CONFIG_DIR / "current_session.txt"
     AI_TYPE_FILE = CONFIG_DIR / "current_ai_type.txt"
 
-    # AI tool paths
-    CLAUDE_PROJECTS_DIR = Path.home() / ".claude/projects"
-    GEMINI_TMP_DIR = Path.home() / ".gemini/tmp"
+    # AI tool paths (standard locations)
+    CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+    GEMINI_TMP_DIR = Path.home() / ".gemini" / "tmp"
 
-    # External tools
-    TASK_EXTRACTOR = Path.home() / "workspace/obsidian_vault/docs/03_project/00_thedomainai/task-picker-agent/task_extractor.py"
+    # External tools (optional - None by default)
+    DEFAULT_TASK_EXTRACTOR: Optional[Path] = None
 
     def __init__(self):
         self._config: dict = {}
@@ -77,11 +77,11 @@ class Config:
         return self.GEMINI_TMP_DIR
 
     @property
-    def task_extractor(self) -> Path:
-        """Get task extractor path."""
+    def task_extractor(self) -> Optional[Path]:
+        """Get task extractor path (optional external tool)."""
         if self._config.get("task_extractor"):
             return Path(self._config["task_extractor"]).expanduser()
-        return self.TASK_EXTRACTOR
+        return self.DEFAULT_TASK_EXTRACTOR
 
     def ensure_config_dir(self) -> None:
         """Ensure config directory exists."""

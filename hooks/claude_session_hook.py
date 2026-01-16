@@ -126,14 +126,19 @@ def cmd_start(title: str | None = None, ai_type: str | None = None):
 
 
 def extract_tasks_from_session(session_id: str):
-    """Extract tasks from session log using task-picker-agent."""
-    if not config.task_extractor.exists():
-        print(f"Task extractor not found: {config.task_extractor}", file=sys.stderr)
+    """Extract tasks from session log using task-picker-agent (optional)."""
+    task_extractor = config.task_extractor
+    if task_extractor is None:
+        # Task extraction is optional - skip silently if not configured
+        return
+
+    if not task_extractor.exists():
+        print(f"Task extractor not found: {task_extractor}", file=sys.stderr)
         return
 
     try:
         result = subprocess.run(
-            ["python3", str(config.task_extractor), "--session", session_id],
+            ["python3", str(task_extractor), "--session", session_id],
             capture_output=True,
             text=True
         )
