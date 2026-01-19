@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from ..constants import DEFAULT_MESSAGE_LIMIT, MESSAGE_TRUNCATE_LENGTH
 from ..exceptions import ExtractorError
 from ..logging_config import get_logger
 from .base import BaseExtractor, Message
@@ -53,7 +54,7 @@ class GeminiExtractor(BaseExtractor):
             logger.debug("Found latest Gemini session: %s", latest_file)
         return latest_file
 
-    def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
+    def extract_messages(self, session_path: Path, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
         """Extract messages from Gemini session JSON file.
 
         Args:
@@ -86,7 +87,7 @@ class GeminiExtractor(BaseExtractor):
         for msg in raw_messages:
             message = self._parse_message(msg)
             if message:
-                messages.append(message.truncate(1000))
+                messages.append(message.truncate(MESSAGE_TRUNCATE_LENGTH))
 
         logger.info(
             "Extracted %d messages from Gemini session %s",

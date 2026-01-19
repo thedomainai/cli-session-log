@@ -52,11 +52,3 @@ class ExtractorError(SessionLogError):
     def __init__(self, message: str, source: str = ""):
         self.source = source
         super().__init__(message)
-
-
-class DuplicateImportError(SessionLogError):
-    """Raised when duplicate messages are detected during import."""
-
-    def __init__(self, count: int):
-        self.count = count
-        super().__init__(f"Duplicate messages detected: {count}")

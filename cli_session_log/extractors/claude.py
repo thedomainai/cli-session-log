@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from ..constants import DEFAULT_MESSAGE_LIMIT, MESSAGE_TRUNCATE_LENGTH
 from ..exceptions import ExtractorError
 from ..logging_config import get_logger
 from .base import BaseExtractor, Message
@@ -55,7 +56,7 @@ class ClaudeExtractor(BaseExtractor):
         logger.debug("Found latest Claude session: %s", latest)
         return latest
 
-    def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
+    def extract_messages(self, session_path: Path, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
         """Extract messages from Claude Code JSONL file.
 
         Args:
@@ -78,7 +79,7 @@ class ClaudeExtractor(BaseExtractor):
                         entry = json.loads(line.strip())
                         message = self._parse_entry(entry)
                         if message:
-                            messages.append(message.truncate(1000))
+                            messages.append(message.truncate(MESSAGE_TRUNCATE_LENGTH))
                     except json.JSONDecodeError as e:
                         errors_count += 1
                         if errors_count <= 3:  # Log first few errors

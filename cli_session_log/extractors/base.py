@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..constants import DEFAULT_MESSAGE_LIMIT, MESSAGE_TRUNCATE_LENGTH
 from ..logging_config import get_logger
 
 logger = get_logger("extractors.base")
@@ -18,7 +19,7 @@ class Message:
     content: str
     timestamp: str = ""
 
-    def truncate(self, max_length: int = 1000) -> "Message":
+    def truncate(self, max_length: int = MESSAGE_TRUNCATE_LENGTH) -> "Message":
         """Return a new Message with truncated content."""
         if len(self.content) <= max_length:
             return self
@@ -51,7 +52,7 @@ class BaseExtractor(ABC):
         pass
 
     @abstractmethod
-    def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
+    def extract_messages(self, session_path: Path, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
         """Extract messages from a session file.
 
         Args:
@@ -63,7 +64,7 @@ class BaseExtractor(ABC):
         """
         pass
 
-    def extract_latest(self, limit: int = 50) -> list[Message]:
+    def extract_latest(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
         """Extract messages from the latest session.
 
         Args:

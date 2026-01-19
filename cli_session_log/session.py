@@ -15,6 +15,16 @@ try:
 except ImportError:
     raise ImportError("Missing dependency: pyyaml. Install with: pip install pyyaml")
 
+from .constants import (
+    DATETIME_FORMAT,
+    LOCK_TIMEOUT_SECONDS,
+    MESSAGE_HASH_LENGTH,
+    MONTH_DIR_FORMAT,
+    SESSION_FILE_VERSION,
+    SESSION_ID_LENGTH,
+    STATUS_ACTIVE,
+    VALID_STATUSES,
+)
 from .exceptions import (
     SessionNotFoundError,
     SessionParseError,
@@ -26,7 +36,6 @@ logger = get_logger("session")
 
 # Type aliases
 SessionStatus = Literal["active", "paused", "completed"]
-VALID_STATUSES: tuple[SessionStatus, ...] = ("active", "paused", "completed")
 
 
 def now_iso() -> str:
@@ -35,14 +44,14 @@ def now_iso() -> str:
 
 
 def generate_session_id() -> str:
-    """Generate a cryptographically secure session ID (8 characters)."""
-    return secrets.token_hex(4)
+    """Generate a cryptographically secure session ID."""
+    return secrets.token_hex(SESSION_ID_LENGTH // 2)
 
 
 def compute_message_hash(role: str, content: str) -> str:
     """Compute hash for a message to detect duplicates."""
     data = f"{role}:{content}".encode("utf-8")
-    return hashlib.sha256(data).hexdigest()[:16]
+    return hashlib.sha256(data).hexdigest()[:MESSAGE_HASH_LENGTH]
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
@@ -87,7 +96,7 @@ def serialize_frontmatter(frontmatter: dict[str, Any], body: str) -> str:
 class SessionManager:
     """Manage CLI sessions stored as Markdown files."""
 
-    LOCK_TIMEOUT = 10  # seconds
+    LOCK_TIMEOUT = LOCK_TIMEOUT_SECONDS
 
     def __init__(self, sessions_dir: Optional[Path] = None):
         """Initialize SessionManager.
@@ -129,7 +138,7 @@ class SessionManager:
 
     def _get_month_dir(self) -> Path:
         """Get the current month's session directory."""
-        month_str = datetime.now().strftime("%Y-%m")
+        month_str = datetime.now().strftime(MONTH_DIR_FORMAT)
         month_dir = self.sessions_dir / month_str
         month_dir.mkdir(parents=True, exist_ok=True)
         return month_dir
@@ -224,12 +233,12 @@ class SessionManager:
         now = now_iso()
 
         frontmatter: dict[str, Any] = {
-            "version": "1.0",
+            "version": SESSION_FILE_VERSION,
             "session_id": session_id,
             "title": title,
             "created_at": now,
             "updated_at": now,
-            "status": "active",
+            "status": STATUS_ACTIVE,
             "tags": [],
             "imported_hashes": [],  # For duplicate detection
         }
@@ -301,7 +310,7 @@ class SessionManager:
                 imported_hashes.append(msg_hash)
                 fm["imported_hashes"] = imported_hashes
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now().strftime(DATETIME_FORMAT)
             log_entry = f"\n### {timestamp}\n**{role}**: {message}\n"
 
             body = body.rstrip() + log_entry + "\n"
