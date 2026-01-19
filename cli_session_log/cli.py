@@ -6,6 +6,14 @@ import sys
 from pathlib import Path
 
 from .config import get_config
+from .constants import (
+    CLI_TABLE_DATE_WIDTH,
+    CLI_TABLE_ID_WIDTH,
+    CLI_TABLE_STATUS_WIDTH,
+    CLI_TABLE_TITLE_WIDTH,
+    STATUS_COMPLETED,
+)
+from .exceptions import SessionLogError, SessionNotFoundError
 from .session import SessionManager
 
 
@@ -24,13 +32,14 @@ def cmd_list(args, manager: SessionManager):
         print("No sessions found.")
         return
 
-    print(f"{'ID':<10} {'Status':<12} {'Title':<30} {'Updated':<20}")
-    print("-" * 75)
+    table_width = CLI_TABLE_ID_WIDTH + CLI_TABLE_STATUS_WIDTH + CLI_TABLE_TITLE_WIDTH + CLI_TABLE_DATE_WIDTH + 3
+    print(f"{'ID':<{CLI_TABLE_ID_WIDTH}} {'Status':<{CLI_TABLE_STATUS_WIDTH}} {'Title':<{CLI_TABLE_TITLE_WIDTH}} {'Updated':<{CLI_TABLE_DATE_WIDTH}}")
+    print("-" * table_width)
 
     for s in sessions:
-        title = s['title'][:30] if s['title'] else "Untitled"
-        updated = s['updated_at'][:19] if s['updated_at'] else ""
-        print(f"{s['id']:<10} {s['status']:<12} {title:<30} {updated:<20}")
+        title = s['title'][:CLI_TABLE_TITLE_WIDTH] if s['title'] else "Untitled"
+        updated = s['updated_at'][:CLI_TABLE_DATE_WIDTH] if s['updated_at'] else ""
+        print(f"{s['id']:<{CLI_TABLE_ID_WIDTH}} {s['status']:<{CLI_TABLE_STATUS_WIDTH}} {title:<{CLI_TABLE_TITLE_WIDTH}} {updated:<{CLI_TABLE_DATE_WIDTH}}")
 
 
 def cmd_show(args, manager: SessionManager):
@@ -38,7 +47,7 @@ def cmd_show(args, manager: SessionManager):
     try:
         content = manager.get_session_content(args.id)
         print(content)
-    except ValueError as e:
+    except (ValueError, SessionLogError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -59,7 +68,7 @@ def cmd_log(args, manager: SessionManager):
         manager.add_log(args.id, message, role)
         fm, _ = manager.get_session(args.id)
         print(f"Added {role} log entry to session {fm['session_id']}")
-    except ValueError as e:
+    except (ValueError, SessionLogError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -84,7 +93,7 @@ def cmd_task(args, manager: SessionManager):
                 status = "done" if task['done'] else "pending"
                 print(f"  {task['num']}. [{status}] {task['text']}")
 
-    except ValueError as e:
+    except (ValueError, SessionLogError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -95,7 +104,7 @@ def cmd_status(args, manager: SessionManager):
         old_status = manager.set_status(args.id, args.status)
         fm, _ = manager.get_session(args.id)
         print(f"Session {fm['session_id']}: {old_status} -> {args.status}")
-    except ValueError as e:
+    except (ValueError, SessionLogError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
@@ -103,10 +112,10 @@ def cmd_status(args, manager: SessionManager):
 def cmd_close(args, manager: SessionManager):
     """Close a session (set status to completed)."""
     try:
-        old_status = manager.set_status(args.id, "completed")
+        old_status = manager.set_status(args.id, STATUS_COMPLETED)
         fm, _ = manager.get_session(args.id)
-        print(f"Session {fm['session_id']}: {old_status} -> completed")
-    except ValueError as e:
+        print(f"Session {fm['session_id']}: {old_status} -> {STATUS_COMPLETED}")
+    except (ValueError, SessionLogError) as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 

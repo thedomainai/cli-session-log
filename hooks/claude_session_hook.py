@@ -27,13 +27,16 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cli_session_log.config import get_config
+from cli_session_log.constants import AI_TYPE_CLAUDE, AI_TYPE_GEMINI, DATETIME_FORMAT
 from cli_session_log.exceptions import ExtractorError, SessionNotFoundError, SessionWriteError
 from cli_session_log.extractors import ClaudeExtractor, GeminiExtractor
+from cli_session_log.extractors.base import BaseExtractor
 from cli_session_log.logging_config import get_logger, setup_logging
 from cli_session_log.session import SessionManager
 
@@ -53,14 +56,14 @@ def ensure_state_dir():
     config.ensure_config_dir()
 
 
-def get_claude_session_id() -> str | None:
+def get_claude_session_id() -> Optional[str]:
     """Get Claude Code session ID from state file."""
     if CLAUDE_SESSION_FILE.exists():
         return CLAUDE_SESSION_FILE.read_text().strip() or None
     return None
 
 
-def set_claude_session_id(session_id: str | None):
+def set_claude_session_id(session_id: Optional[str]) -> None:
     """Set Claude Code session ID in state file."""
     ensure_state_dir()
     if session_id:
@@ -69,14 +72,14 @@ def set_claude_session_id(session_id: str | None):
         CLAUDE_SESSION_FILE.unlink()
 
 
-def get_ai_type() -> str | None:
+def get_ai_type() -> Optional[str]:
     """Get current AI type (claude/gemini)."""
     if config.AI_TYPE_FILE.exists():
         return config.AI_TYPE_FILE.read_text().strip() or None
     return None
 
 
-def set_ai_type(ai_type: str | None):
+def set_ai_type(ai_type: Optional[str]) -> None:
     """Set current AI type."""
     ensure_state_dir()
     if ai_type:
@@ -85,14 +88,14 @@ def set_ai_type(ai_type: str | None):
         config.AI_TYPE_FILE.unlink()
 
 
-def get_current_session_id() -> str | None:
+def get_current_session_id() -> Optional[str]:
     """Get current session ID from state file."""
     if config.STATE_FILE.exists():
         return config.STATE_FILE.read_text().strip() or None
     return None
 
 
-def set_current_session_id(session_id: str | None):
+def set_current_session_id(session_id: Optional[str]) -> None:
     """Set current session ID in state file."""
     ensure_state_dir()
     if session_id:
@@ -101,7 +104,7 @@ def set_current_session_id(session_id: str | None):
         config.STATE_FILE.unlink()
 
 
-def cmd_start(title: str | None = None, ai_type: str | None = None):
+def cmd_start(title: Optional[str] = None, ai_type: Optional[str] = None) -> Optional[str]:
     """Start a new session."""
     manager = SessionManager(config.sessions_dir)
 
@@ -166,39 +169,49 @@ def extract_tasks_from_session(session_id: str):
         print(f"Error extracting tasks: {e}", file=sys.stderr)
 
 
-def import_gemini_conversation(manager: SessionManager, session_id: str) -> int:
-    """Import conversation from Gemini history.
+def import_conversation(
+    manager: SessionManager,
+    session_id: str,
+    extractor: BaseExtractor,
+    ai_name: str
+) -> Tuple[int, int]:
+    """Import conversation from an AI session history.
+
+    This is a generic import function that works with any extractor.
+
+    Args:
+        manager: Session manager instance
+        session_id: Target session ID to import into
+        extractor: Extractor instance (Claude/Gemini)
+        ai_name: Human-readable AI name for messages
 
     Returns:
-        Number of messages imported
+        Tuple of (imported_count, skipped_count)
     """
-    extractor = GeminiExtractor(config.gemini_tmp_dir)
-
     try:
         session_path = extractor.find_latest_session()
         if not session_path:
-            logger.info("No Gemini session found")
-            print("No Gemini session found", file=sys.stderr)
-            return 0
+            logger.info("No %s session found", ai_name)
+            print(f"No {ai_name} session found", file=sys.stderr)
+            return 0, 0
 
         print(f"Importing conversation from: {session_path.name}")
         messages = extractor.extract_messages(session_path)
 
     except ExtractorError as e:
-        logger.error("Failed to extract Gemini conversation: %s", e)
+        logger.error("Failed to extract %s conversation: %s", ai_name, e)
         print(f"Error extracting conversation: {e}", file=sys.stderr)
-        return 0
+        return 0, 0
 
     if not messages:
         print("No messages found in session")
-        return 0
+        return 0, 0
 
     imported = 0
     skipped = 0
 
     for msg in messages:
         try:
-            # Use duplicate detection
             if manager.add_log(session_id, msg.content, msg.role, check_duplicate=True):
                 imported += 1
             else:
@@ -208,7 +221,22 @@ def import_gemini_conversation(manager: SessionManager, session_id: str) -> int:
             print(f"Error adding log: {e}", file=sys.stderr)
 
     logger.info("Imported %d messages, skipped %d duplicates", imported, skipped)
-    print(f"Imported {imported} messages" + (f", skipped {skipped} duplicates" if skipped else ""))
+    if skipped:
+        print(f"Imported {imported} messages, skipped {skipped} duplicates")
+    else:
+        print(f"Imported {imported} messages")
+
+    return imported, skipped
+
+
+def import_gemini_conversation(manager: SessionManager, session_id: str) -> int:
+    """Import conversation from Gemini history.
+
+    Returns:
+        Number of messages imported
+    """
+    extractor = GeminiExtractor(config.gemini_tmp_dir)
+    imported, _ = import_conversation(manager, session_id, extractor, "Gemini")
     return imported
 
 
@@ -219,42 +247,7 @@ def import_claude_conversation(manager: SessionManager, session_id: str) -> int:
         Number of messages imported
     """
     extractor = ClaudeExtractor(config.claude_projects_dir)
-
-    try:
-        session_path = extractor.find_latest_session()
-        if not session_path:
-            logger.info("No Claude Code session found")
-            print("No Claude Code session found", file=sys.stderr)
-            return 0
-
-        print(f"Importing conversation from: {session_path.name}")
-        messages = extractor.extract_messages(session_path)
-
-    except ExtractorError as e:
-        logger.error("Failed to extract Claude conversation: %s", e)
-        print(f"Error extracting conversation: {e}", file=sys.stderr)
-        return 0
-
-    if not messages:
-        print("No messages found in session")
-        return 0
-
-    imported = 0
-    skipped = 0
-
-    for msg in messages:
-        try:
-            # Use duplicate detection
-            if manager.add_log(session_id, msg.content, msg.role, check_duplicate=True):
-                imported += 1
-            else:
-                skipped += 1
-        except (SessionNotFoundError, SessionWriteError) as e:
-            logger.error("Error adding log: %s", e)
-            print(f"Error adding log: {e}", file=sys.stderr)
-
-    logger.info("Imported %d messages, skipped %d duplicates", imported, skipped)
-    print(f"Imported {imported} messages" + (f", skipped {skipped} duplicates" if skipped else ""))
+    imported, _ = import_conversation(manager, session_id, extractor, "Claude Code")
     return imported
 
 
