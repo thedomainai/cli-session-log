@@ -299,3 +299,139 @@ class TestGeminiExtractor:
         messages = extractor.extract_latest()
 
         assert len(messages) == 3
+
+
+class TestClaudeExtractorWithCwd:
+    """Tests for Claude extractor with cwd-based session matching."""
+
+    @pytest.fixture
+    def temp_claude_dir(self):
+        """Create a temporary Claude projects directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def sample_jsonl_content(self):
+        """Sample Claude Code JSONL content."""
+        entries = [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Hello Claude"},
+                "timestamp": "2025-01-01T10:00:00"
+            },
+        ]
+        return "\n".join(json.dumps(e) for e in entries)
+
+    def test_find_session_with_cwd(self, temp_claude_dir, sample_jsonl_content):
+        """Test finding session for a specific working directory."""
+        # Create project directories for different cwds
+        # Claude Code uses dashes: /Users/test/project1 -> Users-test-project1
+        project1_dir = temp_claude_dir / "Users-test-project1"
+        project2_dir = temp_claude_dir / "Users-test-project2"
+        project1_dir.mkdir()
+        project2_dir.mkdir()
+
+        session1 = project1_dir / "session.jsonl"
+        session2 = project2_dir / "session.jsonl"
+        session1.write_text(sample_jsonl_content)
+        session2.write_text(sample_jsonl_content)
+
+        extractor = ClaudeExtractor(temp_claude_dir)
+
+        # Find session for specific cwd
+        result1 = extractor.find_latest_session(cwd="/Users/test/project1")
+        assert result1 == session1
+
+        result2 = extractor.find_latest_session(cwd="/Users/test/project2")
+        assert result2 == session2
+
+    def test_find_session_cwd_fallback(self, temp_claude_dir, sample_jsonl_content):
+        """Test fallback when cwd doesn't match any project."""
+        # Create only one project directory
+        project_dir = temp_claude_dir / "Users-test-existing"
+        project_dir.mkdir()
+        session = project_dir / "session.jsonl"
+        session.write_text(sample_jsonl_content)
+
+        extractor = ClaudeExtractor(temp_claude_dir)
+
+        # Try to find session for non-existent cwd - should fallback
+        result = extractor.find_latest_session(cwd="/Users/test/nonexistent")
+        assert result == session  # Falls back to most recent
+
+    def test_extract_latest_with_cwd(self, temp_claude_dir, sample_jsonl_content):
+        """Test extract_latest with cwd parameter."""
+        project_dir = temp_claude_dir / "Users-test-project"
+        project_dir.mkdir()
+        session = project_dir / "session.jsonl"
+        session.write_text(sample_jsonl_content)
+
+        extractor = ClaudeExtractor(temp_claude_dir)
+        messages = extractor.extract_latest(cwd="/Users/test/project")
+
+        assert len(messages) == 1
+        assert messages[0].role == "User"
+
+
+class TestGeminiExtractorWithCwd:
+    """Tests for Gemini extractor with cwd-based session matching."""
+
+    @pytest.fixture
+    def temp_gemini_dir(self):
+        """Create a temporary Gemini tmp directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def sample_json_content(self):
+        """Sample Gemini session JSON content."""
+        return json.dumps({
+            "messages": [
+                {"type": "user", "content": "Hello Gemini", "timestamp": "2025-01-01T10:00:00"},
+            ]
+        })
+
+    def test_find_session_with_cwd_filter(self, temp_gemini_dir, sample_json_content):
+        """Test finding session with cwd filter."""
+        # Create project directories
+        project1_dir = temp_gemini_dir / "Users-test-project1" / "chats"
+        project2_dir = temp_gemini_dir / "Users-test-project2" / "chats"
+        project1_dir.mkdir(parents=True)
+        project2_dir.mkdir(parents=True)
+
+        session1 = project1_dir / "session-001.json"
+        session2 = project2_dir / "session-002.json"
+        session1.write_text(sample_json_content)
+        session2.write_text(sample_json_content)
+
+        extractor = GeminiExtractor(temp_gemini_dir)
+
+        # With matching cwd, should find matching project
+        result = extractor.find_latest_session(cwd="/Users/test/project1")
+        assert result == session1
+
+    def test_find_session_cwd_no_match(self, temp_gemini_dir, sample_json_content):
+        """Test finding session when cwd doesn't match - searches all."""
+        project_dir = temp_gemini_dir / "other-project" / "chats"
+        project_dir.mkdir(parents=True)
+        session = project_dir / "session-001.json"
+        session.write_text(sample_json_content)
+
+        extractor = GeminiExtractor(temp_gemini_dir)
+
+        # Non-matching cwd should still find the session
+        result = extractor.find_latest_session(cwd="/Users/test/different")
+        assert result == session  # Searches all when no match
+
+    def test_extract_latest_with_cwd(self, temp_gemini_dir, sample_json_content):
+        """Test extract_latest with cwd parameter."""
+        project_dir = temp_gemini_dir / "project" / "chats"
+        project_dir.mkdir(parents=True)
+        session = project_dir / "session-001.json"
+        session.write_text(sample_json_content)
+
+        extractor = GeminiExtractor(temp_gemini_dir)
+        messages = extractor.extract_latest(cwd="/some/path")
+
+        assert len(messages) == 1
+        assert messages[0].role == "User"

@@ -67,9 +67,15 @@ class Config:
     CONFIG_DIR = Path.home() / ".config" / "cli-session-log"
     CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
-    # State files
+    # State files (legacy - single session)
     STATE_FILE = CONFIG_DIR / "current_session.txt"
     AI_TYPE_FILE = CONFIG_DIR / "current_ai_type.txt"
+
+    # State directory for multi-session support
+    STATE_DIR = CONFIG_DIR / "sessions"
+
+    # Supported AI types
+    AI_TYPES = ("claude", "gemini")
 
     # AI tool paths (standard locations)
     CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -162,9 +168,55 @@ class Config:
         """Ensure config directory exists."""
         self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+    def ensure_state_dir(self) -> None:
+        """Ensure state directory for multi-session support exists."""
+        self.STATE_DIR.mkdir(parents=True, exist_ok=True)
+
     def ensure_sessions_dir(self) -> None:
         """Ensure sessions directory exists."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_session_state_file(self, ai_type: str, cwd: str) -> Path:
+        """Get state file path for a specific AI type and working directory.
+
+        Args:
+            ai_type: AI type (claude/gemini)
+            cwd: Working directory path
+
+        Returns:
+            Path to the session state file
+        """
+        # Create a safe filename from cwd
+        safe_cwd = cwd.replace("/", "_").replace("\\", "_").strip("_")
+        if not safe_cwd:
+            safe_cwd = "default"
+        return self.STATE_DIR / f"{ai_type}_{safe_cwd}.json"
+
+    def get_ai_type_state_file(self, ai_type: str) -> Path:
+        """Get the state file for a specific AI type (legacy compatibility).
+
+        Args:
+            ai_type: AI type (claude/gemini)
+
+        Returns:
+            Path to the AI type specific state file
+        """
+        return self.CONFIG_DIR / f"{ai_type}_session_id.txt"
+
+    def list_active_sessions(self, ai_type: Optional[str] = None) -> list[Path]:
+        """List all active session state files.
+
+        Args:
+            ai_type: Optional filter by AI type
+
+        Returns:
+            List of session state file paths
+        """
+        if not self.STATE_DIR.exists():
+            return []
+
+        pattern = f"{ai_type}_*.json" if ai_type else "*.json"
+        return list(self.STATE_DIR.glob(pattern))
 
 
 # Singleton instance

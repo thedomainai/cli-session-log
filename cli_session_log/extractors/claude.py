@@ -19,7 +19,8 @@ class ClaudeExtractor(BaseExtractor):
         """Find the latest Claude Code session file.
 
         Args:
-            cwd: Optional working directory to filter by
+            cwd: Optional working directory to filter by. If provided, will look for
+                 the project directory matching this cwd.
 
         Returns:
             Path to the latest .jsonl session file
@@ -28,23 +29,32 @@ class ClaudeExtractor(BaseExtractor):
             logger.debug("Claude projects dir does not exist: %s", self.base_dir)
             return None
 
+        project_dir: Optional[Path] = None
+
         if cwd:
             # Convert cwd to Claude's directory naming format
-            dir_name = cwd.replace("/", "-")
+            # Claude Code uses dashes instead of slashes: /Users/foo/bar -> Users-foo-bar
+            dir_name = cwd.replace("/", "-").replace("\\", "-")
             if dir_name.startswith("-"):
                 dir_name = dir_name[1:]
             project_dir = self.base_dir / dir_name
-        else:
+
+            if not project_dir.exists():
+                logger.warning(
+                    "Project directory for cwd '%s' not found: %s. "
+                    "Falling back to most recent project.",
+                    cwd, project_dir
+                )
+                project_dir = None
+
+        if project_dir is None:
             # Find most recently modified project directory
             project_dirs = [d for d in self.base_dir.iterdir() if d.is_dir()]
             if not project_dirs:
                 logger.debug("No project directories found in %s", self.base_dir)
                 return None
             project_dir = max(project_dirs, key=lambda d: d.stat().st_mtime)
-
-        if not project_dir.exists():
-            logger.debug("Project directory does not exist: %s", project_dir)
-            return None
+            logger.debug("Using most recent project directory: %s", project_dir)
 
         # Find most recent .jsonl file
         jsonl_files = list(project_dir.glob("*.jsonl"))
@@ -53,7 +63,7 @@ class ClaudeExtractor(BaseExtractor):
             return None
 
         latest = max(jsonl_files, key=lambda f: f.stat().st_mtime)
-        logger.debug("Found latest Claude session: %s", latest)
+        logger.info("Found Claude session for cwd '%s': %s", cwd or "(any)", latest)
         return latest
 
     def extract_messages(self, session_path: Path, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
