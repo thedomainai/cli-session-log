@@ -35,11 +35,50 @@ class MockExtractor(BaseExtractor):
         self._session_path = session_path
         super().__init__(Path("/tmp"))
 
-    def find_latest_session(self) -> Optional[Path]:
+    def find_latest_session(self, cwd: Optional[str] = None) -> Optional[Path]:
         return self._session_path
 
     def extract_messages(self, session_path: Path, limit: int = 50) -> list[Message]:
         return self.messages[-limit:]
+
+
+def create_mock_config(tmpdir: Path) -> MagicMock:
+    """Create a properly configured mock config object."""
+    state_dir = tmpdir / "sessions_state"
+
+    mock_conf = MagicMock()
+    mock_conf.CONFIG_DIR = tmpdir
+    mock_conf.STATE_FILE = tmpdir / "current_session.txt"
+    mock_conf.AI_TYPE_FILE = tmpdir / "current_ai_type.txt"
+    mock_conf.STATE_DIR = state_dir
+    mock_conf.sessions_dir = tmpdir / "sessions"
+    mock_conf.task_extractor = None
+    mock_conf.AI_TYPES = ("claude", "gemini")
+
+    def ensure_config_dir():
+        mock_conf.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    def ensure_state_dir():
+        mock_conf.STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def get_session_state_file(ai_type: str, cwd: str) -> Path:
+        safe_cwd = cwd.replace("/", "_").replace("\\", "_").strip("_")
+        if not safe_cwd:
+            safe_cwd = "default"
+        return mock_conf.STATE_DIR / f"{ai_type}_{safe_cwd}.json"
+
+    def list_active_sessions(ai_type: Optional[str] = None) -> list[Path]:
+        if not mock_conf.STATE_DIR.exists():
+            return []
+        pattern = f"{ai_type}_*.json" if ai_type else "*.json"
+        return list(mock_conf.STATE_DIR.glob(pattern))
+
+    mock_conf.ensure_config_dir = ensure_config_dir
+    mock_conf.ensure_state_dir = ensure_state_dir
+    mock_conf.get_session_state_file = get_session_state_file
+    mock_conf.list_active_sessions = list_active_sessions
+
+    return mock_conf
 
 
 class TestStateManagement:
@@ -49,18 +88,7 @@ class TestStateManagement:
     def mock_config(self):
         """Mock config with temp directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-
-            mock_conf = MagicMock()
-            mock_conf.CONFIG_DIR = tmpdir
-            mock_conf.STATE_FILE = tmpdir / "current_session.txt"
-            mock_conf.AI_TYPE_FILE = tmpdir / "current_ai_type.txt"
-            mock_conf.sessions_dir = tmpdir / "sessions"
-            mock_conf.task_extractor = None
-
-            mock_conf.ensure_config_dir = lambda: mock_conf.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-            yield mock_conf
+            yield create_mock_config(Path(tmpdir))
 
     def test_set_get_current_session_id(self, mock_config):
         """Test setting and getting current session ID."""
@@ -184,23 +212,13 @@ class TestCmdStart:
     def mock_config(self):
         """Mock config with temp directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-
-            mock_conf = MagicMock()
-            mock_conf.CONFIG_DIR = tmpdir
-            mock_conf.STATE_FILE = tmpdir / "current_session.txt"
-            mock_conf.AI_TYPE_FILE = tmpdir / "current_ai_type.txt"
-            mock_conf.sessions_dir = tmpdir / "sessions"
-            mock_conf.task_extractor = None
-
-            mock_conf.ensure_config_dir = lambda: mock_conf.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-            yield mock_conf
+            yield create_mock_config(Path(tmpdir))
 
     def test_cmd_start_creates_session(self, mock_config, capsys):
         """Test starting a new session."""
         with patch("hooks.claude_session_hook.config", mock_config):
             mock_config.ensure_config_dir()
+            mock_config.ensure_state_dir()
 
             session_id = cmd_start("Test Session", "claude")
 
@@ -215,24 +233,26 @@ class TestCmdStart:
         """Test starting when session already active."""
         with patch("hooks.claude_session_hook.config", mock_config):
             mock_config.ensure_config_dir()
+            mock_config.ensure_state_dir()
 
             # Start first session
             session_id1 = cmd_start("First Session", "claude")
             capsys.readouterr()
 
-            # Try to start second session
+            # Try to start second session (same cwd)
             session_id2 = cmd_start("Second Session", "claude")
 
             # Should return the existing session
             assert session_id2 == session_id1
 
             captured = capsys.readouterr()
-            assert "Session already active" in captured.err
+            assert "Session already active" in captured.out
 
     def test_cmd_start_detects_ai_type_from_title(self, mock_config, capsys):
         """Test AI type detection from title."""
         with patch("hooks.claude_session_hook.config", mock_config):
             mock_config.ensure_config_dir()
+            mock_config.ensure_state_dir()
 
             # Test with "gemini" in title
             session_id = cmd_start("Gemini Code Review", None)
@@ -248,17 +268,7 @@ class TestCmdCurrent:
     def mock_config(self):
         """Mock config with temp directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-
-            mock_conf = MagicMock()
-            mock_conf.CONFIG_DIR = tmpdir
-            mock_conf.STATE_FILE = tmpdir / "current_session.txt"
-            mock_conf.AI_TYPE_FILE = tmpdir / "current_ai_type.txt"
-            mock_conf.sessions_dir = tmpdir / "sessions"
-
-            mock_conf.ensure_config_dir = lambda: mock_conf.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-            yield mock_conf
+            yield create_mock_config(Path(tmpdir))
 
     def test_cmd_current_with_active_session(self, mock_config, capsys):
         """Test showing current session ID."""
@@ -275,6 +285,7 @@ class TestCmdCurrent:
         """Test showing current when no session active."""
         with patch("hooks.claude_session_hook.config", mock_config):
             mock_config.ensure_config_dir()
+            mock_config.ensure_state_dir()
 
             with pytest.raises(SystemExit) as exc_info:
                 cmd_current()

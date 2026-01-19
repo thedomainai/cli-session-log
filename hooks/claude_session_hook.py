@@ -5,6 +5,10 @@ Claude Code Hook for session management.
 This hook is called by Claude Code on specific events:
 - Stop: When the session ends
 
+Supports parallel multi-session management:
+- Multiple Claude Code sessions in different directories
+- Simultaneous Claude and Gemini sessions
+
 Usage in ~/.claude/settings.json:
 {
   "hooks": {
@@ -23,8 +27,11 @@ Usage in ~/.claude/settings.json:
 }
 """
 
+import json
+import os
 import subprocess
 import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -47,56 +54,128 @@ logger = get_logger("hook")
 # Get configuration
 config = get_config()
 
-# State file for Claude session ID (not in config as it's hook-specific)
-CLAUDE_SESSION_FILE = config.CONFIG_DIR / "claude_session_id.txt"
+
+@dataclass
+class SessionState:
+    """State for an active session."""
+    session_id: str
+    ai_type: str
+    cwd: str
+    start_timestamp: str
+    title: Optional[str] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2)
+
+    @classmethod
+    def from_json(cls, data: str) -> "SessionState":
+        return cls(**json.loads(data))
 
 
 def ensure_state_dir():
     """Ensure state directory exists."""
     config.ensure_config_dir()
+    config.ensure_state_dir()
 
 
-def get_claude_session_id() -> Optional[str]:
-    """Get Claude Code session ID from state file."""
-    if CLAUDE_SESSION_FILE.exists():
-        return CLAUDE_SESSION_FILE.read_text().strip() or None
+def get_current_cwd() -> str:
+    """Get current working directory."""
+    return os.getcwd()
+
+
+def get_session_state(ai_type: str, cwd: str) -> Optional[SessionState]:
+    """Get session state for a specific AI type and cwd.
+
+    Args:
+        ai_type: AI type (claude/gemini)
+        cwd: Working directory
+
+    Returns:
+        SessionState if exists, None otherwise
+    """
+    state_file = config.get_session_state_file(ai_type, cwd)
+    if state_file.exists():
+        try:
+            return SessionState.from_json(state_file.read_text())
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse session state: %s", e)
     return None
 
 
-def set_claude_session_id(session_id: Optional[str]) -> None:
-    """Set Claude Code session ID in state file."""
+def set_session_state(state: SessionState) -> None:
+    """Save session state.
+
+    Args:
+        state: SessionState to save
+    """
     ensure_state_dir()
-    if session_id:
-        CLAUDE_SESSION_FILE.write_text(session_id)
-    elif CLAUDE_SESSION_FILE.exists():
-        CLAUDE_SESSION_FILE.unlink()
+    state_file = config.get_session_state_file(state.ai_type, state.cwd)
+    state_file.write_text(state.to_json())
+    logger.debug("Saved session state to %s", state_file)
 
 
-def get_ai_type() -> Optional[str]:
-    """Get current AI type (claude/gemini)."""
-    if config.AI_TYPE_FILE.exists():
-        return config.AI_TYPE_FILE.read_text().strip() or None
+def clear_session_state(ai_type: str, cwd: str) -> None:
+    """Clear session state for a specific AI type and cwd.
+
+    Args:
+        ai_type: AI type (claude/gemini)
+        cwd: Working directory
+    """
+    state_file = config.get_session_state_file(ai_type, cwd)
+    if state_file.exists():
+        state_file.unlink()
+        logger.debug("Cleared session state: %s", state_file)
+
+
+def find_session_by_cwd(cwd: str) -> Optional[SessionState]:
+    """Find active session by working directory (any AI type).
+
+    Args:
+        cwd: Working directory
+
+    Returns:
+        SessionState if found, None otherwise
+    """
+    for ai_type in config.AI_TYPES:
+        state = get_session_state(ai_type, cwd)
+        if state:
+            return state
     return None
 
 
-def set_ai_type(ai_type: Optional[str]) -> None:
-    """Set current AI type."""
-    ensure_state_dir()
-    if ai_type:
-        config.AI_TYPE_FILE.write_text(ai_type)
-    elif config.AI_TYPE_FILE.exists():
-        config.AI_TYPE_FILE.unlink()
+def list_all_active_sessions() -> list[SessionState]:
+    """List all active sessions across all AI types.
+
+    Returns:
+        List of active SessionState objects
+    """
+    sessions = []
+    for state_file in config.list_active_sessions():
+        try:
+            state = SessionState.from_json(state_file.read_text())
+            sessions.append(state)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse state file %s: %s", state_file, e)
+    return sessions
 
 
+# Legacy compatibility functions
 def get_current_session_id() -> Optional[str]:
-    """Get current session ID from state file."""
+    """Get current session ID from legacy state file or by cwd."""
+    # First try to find by current cwd
+    cwd = get_current_cwd()
+    state = find_session_by_cwd(cwd)
+    if state:
+        return state.session_id
+
+    # Fall back to legacy state file
     if config.STATE_FILE.exists():
         return config.STATE_FILE.read_text().strip() or None
     return None
 
 
 def set_current_session_id(session_id: Optional[str]) -> None:
-    """Set current session ID in state file."""
+    """Set current session ID in legacy state file."""
     ensure_state_dir()
     if session_id:
         config.STATE_FILE.write_text(session_id)
@@ -104,35 +183,73 @@ def set_current_session_id(session_id: Optional[str]) -> None:
         config.STATE_FILE.unlink()
 
 
-def cmd_start(title: Optional[str] = None, ai_type: Optional[str] = None) -> Optional[str]:
-    """Start a new session."""
-    manager = SessionManager(config.sessions_dir)
+def get_ai_type() -> Optional[str]:
+    """Get AI type for current cwd or from legacy state file."""
+    cwd = get_current_cwd()
+    state = find_session_by_cwd(cwd)
+    if state:
+        return state.ai_type
 
-    # Check if there's already an active session
-    current_id = get_current_session_id()
-    if current_id:
-        logger.warning("Session already active: %s", current_id)
-        print(f"Session already active: {current_id}", file=sys.stderr)
-        return current_id
+    # Fall back to legacy state file
+    if config.AI_TYPE_FILE.exists():
+        return config.AI_TYPE_FILE.read_text().strip() or None
+    return None
+
+
+def set_ai_type(ai_type: Optional[str]) -> None:
+    """Set current AI type in legacy state file."""
+    ensure_state_dir()
+    if ai_type:
+        config.AI_TYPE_FILE.write_text(ai_type)
+    elif config.AI_TYPE_FILE.exists():
+        config.AI_TYPE_FILE.unlink()
+
+
+def cmd_start(title: Optional[str] = None, ai_type: Optional[str] = None) -> Optional[str]:
+    """Start a new session.
+
+    Supports parallel sessions:
+    - Different AI types (Claude/Gemini) can run simultaneously
+    - Same AI type in different directories can run simultaneously
+    - Same AI type in same directory will reuse existing session
+    """
+    manager = SessionManager(config.sessions_dir)
+    cwd = get_current_cwd()
 
     # Detect AI type from title if not specified
     if not ai_type and title:
         title_lower = title.lower()
         if "gemini" in title_lower:
-            ai_type = "gemini"
+            ai_type = AI_TYPE_GEMINI
         elif "claude" in title_lower:
-            ai_type = "claude"
+            ai_type = AI_TYPE_CLAUDE
 
-    ai_type = ai_type or "claude"  # Default to claude
+    ai_type = ai_type or AI_TYPE_CLAUDE  # Default to claude
+
+    # Check if there's already an active session for this AI type and cwd
+    existing_state = get_session_state(ai_type, cwd)
+    if existing_state:
+        logger.info("Session already active for %s in %s: %s", ai_type, cwd, existing_state.session_id)
+        print(f"Session already active: {existing_state.session_id} ({ai_type})")
+        return existing_state.session_id
 
     # Create new session
-    title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime(DATETIME_FORMAT)}"
 
     try:
         session_id, session_file = manager.create_session(title)
-        set_current_session_id(session_id)
-        set_ai_type(ai_type)
-        logger.info("Started session: %s (%s)", session_id, ai_type)
+
+        # Save session state with cwd
+        state = SessionState(
+            session_id=session_id,
+            ai_type=ai_type,
+            cwd=cwd,
+            start_timestamp=datetime.now().isoformat(),
+            title=title
+        )
+        set_session_state(state)
+
+        logger.info("Started session: %s (%s) in %s", session_id, ai_type, cwd)
         print(f"Session started: {session_id} ({ai_type})")
         return session_id
     except SessionWriteError as e:
@@ -173,7 +290,8 @@ def import_conversation(
     manager: SessionManager,
     session_id: str,
     extractor: BaseExtractor,
-    ai_name: str
+    ai_name: str,
+    cwd: Optional[str] = None
 ) -> Tuple[int, int]:
     """Import conversation from an AI session history.
 
@@ -184,14 +302,15 @@ def import_conversation(
         session_id: Target session ID to import into
         extractor: Extractor instance (Claude/Gemini)
         ai_name: Human-readable AI name for messages
+        cwd: Optional working directory to filter sessions
 
     Returns:
         Tuple of (imported_count, skipped_count)
     """
     try:
-        session_path = extractor.find_latest_session()
+        session_path = extractor.find_latest_session(cwd=cwd)
         if not session_path:
-            logger.info("No %s session found", ai_name)
+            logger.info("No %s session found for cwd: %s", ai_name, cwd)
             print(f"No {ai_name} session found", file=sys.stderr)
             return 0, 0
 
@@ -229,49 +348,80 @@ def import_conversation(
     return imported, skipped
 
 
-def import_gemini_conversation(manager: SessionManager, session_id: str) -> int:
+def import_gemini_conversation(manager: SessionManager, session_id: str, cwd: Optional[str] = None) -> int:
     """Import conversation from Gemini history.
+
+    Args:
+        manager: SessionManager instance
+        session_id: Target session ID
+        cwd: Working directory to filter sessions (optional)
 
     Returns:
         Number of messages imported
     """
     extractor = GeminiExtractor(config.gemini_tmp_dir)
-    imported, _ = import_conversation(manager, session_id, extractor, "Gemini")
+    imported, _ = import_conversation(manager, session_id, extractor, "Gemini", cwd)
     return imported
 
 
-def import_claude_conversation(manager: SessionManager, session_id: str) -> int:
+def import_claude_conversation(manager: SessionManager, session_id: str, cwd: Optional[str] = None) -> int:
     """Import conversation from Claude Code history.
+
+    Args:
+        manager: SessionManager instance
+        session_id: Target session ID
+        cwd: Working directory to filter sessions (optional)
 
     Returns:
         Number of messages imported
     """
     extractor = ClaudeExtractor(config.claude_projects_dir)
-    imported, _ = import_conversation(manager, session_id, extractor, "Claude Code")
+    imported, _ = import_conversation(manager, session_id, extractor, "Claude Code", cwd)
     return imported
 
 
-def cmd_stop():
-    """Stop the current session, import conversation, and extract tasks."""
+def cmd_stop(ai_type_arg: Optional[str] = None):
+    """Stop the current session, import conversation, and extract tasks.
+
+    Uses cwd to identify the correct session to stop.
+
+    Args:
+        ai_type_arg: Optional AI type override
+    """
     manager = SessionManager(config.sessions_dir)
+    cwd = get_current_cwd()
 
-    current_id = get_current_session_id()
-    if not current_id:
-        logger.warning("No active session to stop")
-        print("No active session", file=sys.stderr)
-        return
+    # Find session by cwd
+    state = find_session_by_cwd(cwd)
 
-    ai_type = get_ai_type() or "claude"
-    logger.info("Stopping session: %s (%s)", current_id, ai_type)
+    if not state:
+        # Legacy fallback
+        current_id = None
+        if config.STATE_FILE.exists():
+            current_id = config.STATE_FILE.read_text().strip() or None
+
+        if not current_id:
+            logger.warning("No active session to stop in %s", cwd)
+            print(f"No active session in {cwd}", file=sys.stderr)
+            return
+
+        ai_type = ai_type_arg or (config.AI_TYPE_FILE.read_text().strip() if config.AI_TYPE_FILE.exists() else AI_TYPE_CLAUDE)
+        logger.info("Using legacy session state: %s (%s)", current_id, ai_type)
+    else:
+        current_id = state.session_id
+        ai_type = ai_type_arg or state.ai_type
+        cwd = state.cwd  # Use stored cwd
+
+    logger.info("Stopping session: %s (%s) in %s", current_id, ai_type, cwd)
 
     try:
-        # Import conversation based on AI type
-        if ai_type == "gemini":
+        # Import conversation based on AI type, using cwd
+        if ai_type == AI_TYPE_GEMINI:
             print("Importing conversation from Gemini...")
-            import_gemini_conversation(manager, current_id)
+            import_gemini_conversation(manager, current_id, cwd)
         else:
             print("Importing conversation from Claude Code...")
-            import_claude_conversation(manager, current_id)
+            import_claude_conversation(manager, current_id, cwd)
 
         manager.set_status(current_id, "completed")
         logger.info("Session completed: %s", current_id)
@@ -285,8 +435,15 @@ def cmd_stop():
         logger.error("Error stopping session: %s", e)
         print(f"Error: {e}", file=sys.stderr)
     finally:
-        set_current_session_id(None)
-        set_ai_type(None)
+        # Clear session state
+        if state:
+            clear_session_state(state.ai_type, state.cwd)
+        else:
+            # Legacy cleanup
+            if config.STATE_FILE.exists():
+                config.STATE_FILE.unlink()
+            if config.AI_TYPE_FILE.exists():
+                config.AI_TYPE_FILE.unlink()
 
 
 def cmd_log(role: str, message: str):
@@ -309,18 +466,42 @@ def cmd_log(role: str, message: str):
 
 
 def cmd_current():
-    """Show current session ID."""
-    current_id = get_current_session_id()
-    if current_id:
-        print(current_id)
+    """Show current session for this working directory."""
+    cwd = get_current_cwd()
+    state = find_session_by_cwd(cwd)
+
+    if state:
+        print(f"{state.session_id} ({state.ai_type})")
     else:
-        print("No active session", file=sys.stderr)
-        sys.exit(1)
+        # Legacy fallback
+        current_id = get_current_session_id()
+        if current_id:
+            ai_type = get_ai_type() or "unknown"
+            print(f"{current_id} ({ai_type}) [legacy]")
+        else:
+            print(f"No active session in {cwd}", file=sys.stderr)
+            sys.exit(1)
+
+
+def cmd_list():
+    """List all active sessions."""
+    sessions = list_all_active_sessions()
+
+    if not sessions:
+        print("No active sessions")
+        return
+
+    print(f"Active sessions ({len(sessions)}):")
+    for s in sessions:
+        print(f"  {s.session_id} ({s.ai_type}) - {s.cwd}")
+        if s.title:
+            print(f"    Title: {s.title}")
+        print(f"    Started: {s.start_timestamp}")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: claude_session_hook.py <start|stop|log|current> [args]", file=sys.stderr)
+        print("Usage: claude_session_hook.py <start|stop|log|current|list> [args]", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -328,9 +509,11 @@ def main():
 
     if cmd == "start":
         title = sys.argv[2] if len(sys.argv) > 2 else None
-        cmd_start(title)
+        ai_type = sys.argv[3] if len(sys.argv) > 3 else None
+        cmd_start(title, ai_type)
     elif cmd == "stop":
-        cmd_stop()
+        ai_type = sys.argv[2] if len(sys.argv) > 2 else None
+        cmd_stop(ai_type)
     elif cmd == "log":
         if len(sys.argv) < 4:
             print("Usage: claude_session_hook.py log <User|AI> <message>", file=sys.stderr)
@@ -338,6 +521,8 @@ def main():
         cmd_log(sys.argv[2], sys.argv[3])
     elif cmd == "current":
         cmd_current()
+    elif cmd == "list":
+        cmd_list()
     else:
         logger.error("Unknown command: %s", cmd)
         print(f"Unknown command: {cmd}", file=sys.stderr)

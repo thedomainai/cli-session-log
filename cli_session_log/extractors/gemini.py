@@ -15,8 +15,12 @@ logger = get_logger("extractors.gemini")
 class GeminiExtractor(BaseExtractor):
     """Extract conversations from Gemini session files."""
 
-    def find_latest_session(self) -> Optional[Path]:
+    def find_latest_session(self, cwd: Optional[str] = None) -> Optional[Path]:
         """Find the latest Gemini session file.
+
+        Args:
+            cwd: Optional working directory to filter by. If provided, will try to
+                 find sessions in the project directory matching this cwd.
 
         Returns:
             Path to the latest session JSON file
@@ -34,7 +38,23 @@ class GeminiExtractor(BaseExtractor):
             logger.debug("No project directories with chats found in %s", self.base_dir)
             return None
 
-        # Find the latest session file across all projects
+        # If cwd is provided, try to filter by project directory
+        if cwd:
+            # Convert cwd to potential directory name formats
+            # Gemini may use different naming conventions
+            dir_name = cwd.replace("/", "-").replace("\\", "-")
+            if dir_name.startswith("-"):
+                dir_name = dir_name[1:]
+
+            # Try exact match first
+            matched_dirs = [d for d in project_dirs if dir_name in d.name]
+            if matched_dirs:
+                project_dirs = matched_dirs
+                logger.debug("Filtered to %d project directories matching cwd: %s", len(matched_dirs), cwd)
+            else:
+                logger.debug("No project directories match cwd '%s', searching all", cwd)
+
+        # Find the latest session file across filtered projects
         latest_file: Optional[Path] = None
         latest_mtime = 0.0
 
@@ -51,7 +71,7 @@ class GeminiExtractor(BaseExtractor):
                     continue
 
         if latest_file:
-            logger.debug("Found latest Gemini session: %s", latest_file)
+            logger.info("Found Gemini session for cwd '%s': %s", cwd or "(any)", latest_file)
         return latest_file
 
     def extract_messages(self, session_path: Path, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:

@@ -186,3 +186,95 @@ class TestGetConfig:
         reset_config()
         config2 = get_config()
         assert config1 is not config2
+
+
+class TestMultiSessionConfig:
+    """Tests for multi-session configuration methods."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset config singleton before each test."""
+        reset_config()
+        yield
+        reset_config()
+
+    @pytest.fixture
+    def temp_state_dir(self, tmp_path):
+        """Create temporary state directory."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir(parents=True)
+        return state_dir
+
+    def test_get_session_state_file(self, tmp_path):
+        """Test getting session state file path."""
+        config = Config()
+        with patch.object(Config, "STATE_DIR", tmp_path):
+            # Test normal path
+            path = config.get_session_state_file("claude", "/Users/test/project")
+            assert path.parent == tmp_path
+            assert "claude" in path.name
+            assert "Users_test_project" in path.name
+            assert path.suffix == ".json"
+
+    def test_get_session_state_file_empty_cwd(self, tmp_path):
+        """Test getting session state file with empty cwd."""
+        config = Config()
+        with patch.object(Config, "STATE_DIR", tmp_path):
+            path = config.get_session_state_file("claude", "")
+            assert "default" in path.name
+
+    def test_get_ai_type_state_file(self, tmp_path):
+        """Test getting AI type state file."""
+        config = Config()
+        with patch.object(Config, "CONFIG_DIR", tmp_path):
+            path = config.get_ai_type_state_file("claude")
+            assert path.name == "claude_session_id.txt"
+            assert path.parent == tmp_path
+
+    def test_list_active_sessions_empty(self, tmp_path):
+        """Test listing active sessions when none exist."""
+        config = Config()
+        with patch.object(Config, "STATE_DIR", tmp_path):
+            sessions = config.list_active_sessions()
+            assert sessions == []
+
+    def test_list_active_sessions_with_files(self, tmp_path):
+        """Test listing active sessions with files."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+
+        # Create some session files
+        (state_dir / "claude_project1.json").write_text("{}")
+        (state_dir / "gemini_project2.json").write_text("{}")
+
+        config = Config()
+        with patch.object(Config, "STATE_DIR", state_dir):
+            sessions = config.list_active_sessions()
+            assert len(sessions) == 2
+
+    def test_list_active_sessions_filter_by_ai_type(self, tmp_path):
+        """Test filtering active sessions by AI type."""
+        state_dir = tmp_path / "sessions"
+        state_dir.mkdir()
+
+        # Create some session files
+        (state_dir / "claude_project1.json").write_text("{}")
+        (state_dir / "claude_project2.json").write_text("{}")
+        (state_dir / "gemini_project3.json").write_text("{}")
+
+        config = Config()
+        with patch.object(Config, "STATE_DIR", state_dir):
+            claude_sessions = config.list_active_sessions("claude")
+            gemini_sessions = config.list_active_sessions("gemini")
+
+            assert len(claude_sessions) == 2
+            assert len(gemini_sessions) == 1
+
+    def test_ensure_state_dir(self, tmp_path):
+        """Test ensuring state directory exists."""
+        state_dir = tmp_path / "sessions"
+
+        config = Config()
+        with patch.object(Config, "STATE_DIR", state_dir):
+            config.ensure_state_dir()
+            assert state_dir.exists()

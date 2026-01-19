@@ -43,8 +43,11 @@ class BaseExtractor(ABC):
         logger.debug("Initialized %s with base_dir: %s", self.__class__.__name__, base_dir)
 
     @abstractmethod
-    def find_latest_session(self) -> Optional[Path]:
+    def find_latest_session(self, cwd: Optional[str] = None) -> Optional[Path]:
         """Find the most recent session file.
+
+        Args:
+            cwd: Optional working directory to filter sessions by
 
         Returns:
             Path to the latest session file, or None if not found
@@ -64,18 +67,19 @@ class BaseExtractor(ABC):
         """
         pass
 
-    def extract_latest(self, limit: int = DEFAULT_MESSAGE_LIMIT) -> list[Message]:
+    def extract_latest(self, limit: int = DEFAULT_MESSAGE_LIMIT, cwd: Optional[str] = None) -> list[Message]:
         """Extract messages from the latest session.
 
         Args:
             limit: Maximum number of messages to return
+            cwd: Optional working directory to filter sessions by
 
         Returns:
             List of Message objects, empty if no session found
         """
-        session_path = self.find_latest_session()
+        session_path = self.find_latest_session(cwd=cwd)
         if session_path is None:
-            logger.info("No session found in %s", self.base_dir)
+            logger.info("No session found in %s for cwd: %s", self.base_dir, cwd or "(any)")
             return []
         logger.debug("Extracting from latest session: %s", session_path)
         return self.extract_messages(session_path, limit)
