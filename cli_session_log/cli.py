@@ -4,6 +4,7 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable
 
 from .config import get_config
 from .constants import (
@@ -17,14 +18,14 @@ from .exceptions import SessionLogError, SessionNotFoundError
 from .session import SessionManager
 
 
-def cmd_new(args, manager: SessionManager):
+def cmd_new(args: argparse.Namespace, manager: SessionManager) -> None:
     """Create a new session."""
     session_id, session_file = manager.create_session(args.title)
     print(f"Created session: {session_id}")
     print(f"File: {session_file}")
 
 
-def cmd_list(args, manager: SessionManager):
+def cmd_list(args: argparse.Namespace, manager: SessionManager) -> None:
     """List sessions."""
     sessions = manager.list_sessions(args.status)
 
@@ -42,7 +43,7 @@ def cmd_list(args, manager: SessionManager):
         print(f"{s['id']:<{CLI_TABLE_ID_WIDTH}} {s['status']:<{CLI_TABLE_STATUS_WIDTH}} {title:<{CLI_TABLE_TITLE_WIDTH}} {updated:<{CLI_TABLE_DATE_WIDTH}}")
 
 
-def cmd_show(args, manager: SessionManager):
+def cmd_show(args: argparse.Namespace, manager: SessionManager) -> None:
     """Show session details."""
     try:
         content = manager.get_session_content(args.id)
@@ -52,7 +53,7 @@ def cmd_show(args, manager: SessionManager):
         sys.exit(1)
 
 
-def cmd_log(args, manager: SessionManager):
+def cmd_log(args: argparse.Namespace, manager: SessionManager) -> None:
     """Add a log entry to a session."""
     if args.user:
         role = "User"
@@ -73,7 +74,7 @@ def cmd_log(args, manager: SessionManager):
         sys.exit(1)
 
 
-def cmd_task(args, manager: SessionManager):
+def cmd_task(args: argparse.Namespace, manager: SessionManager) -> None:
     """Manage tasks in a session."""
     try:
         if args.action == "add":
@@ -81,7 +82,13 @@ def cmd_task(args, manager: SessionManager):
             print(f"Added task: {args.text}")
 
         elif args.action == "done":
-            task_num = int(args.text)
+            try:
+                task_num = int(args.text)
+                if task_num < 1:
+                    raise ValueError("Task number must be a positive integer")
+            except ValueError:
+                print(f"Invalid task number: '{args.text}'. Please provide a positive integer.", file=sys.stderr)
+                sys.exit(1)
             manager.complete_task(args.id, task_num)
             print(f"Completed task {task_num}")
 
@@ -98,7 +105,7 @@ def cmd_task(args, manager: SessionManager):
         sys.exit(1)
 
 
-def cmd_status(args, manager: SessionManager):
+def cmd_status(args: argparse.Namespace, manager: SessionManager) -> None:
     """Change session status."""
     try:
         old_status = manager.set_status(args.id, args.status)
@@ -109,7 +116,7 @@ def cmd_status(args, manager: SessionManager):
         sys.exit(1)
 
 
-def cmd_close(args, manager: SessionManager):
+def cmd_close(args: argparse.Namespace, manager: SessionManager) -> None:
     """Close a session (set status to completed)."""
     try:
         old_status = manager.set_status(args.id, STATUS_COMPLETED)
@@ -120,7 +127,7 @@ def cmd_close(args, manager: SessionManager):
         sys.exit(1)
 
 
-def cmd_stats(args, manager: SessionManager):
+def cmd_stats(args: argparse.Namespace, manager: SessionManager) -> None:
     """Display session statistics."""
     sessions = manager.list_sessions(None)
 
@@ -165,7 +172,8 @@ def cmd_stats(args, manager: SessionManager):
     print("=" * 40)
 
 
-def main():
+def main() -> None:
+    """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
         prog="session-log",
         description="Manage CLI sessions with conversation logs and task tracking"
@@ -221,7 +229,8 @@ def main():
     manager = SessionManager(sessions_dir)
 
     # Dispatch commands
-    commands = {
+    CommandHandler = Callable[[argparse.Namespace, SessionManager], None]
+    commands: dict[str, CommandHandler] = {
         "new": cmd_new,
         "list": cmd_list,
         "show": cmd_show,

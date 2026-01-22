@@ -1,30 +1,38 @@
 # Claude Code Hooks Integration
 
-## セットアップ
+This directory contains hooks for automatic session logging integration with Claude Code and Gemini CLI.
 
-### 1. シェルエイリアス（セッション開始を自動化）
+## Setup
 
-`~/.zshrc` または `~/.bashrc` に追加:
+### 1. Shell Alias (Automate Session Start/Stop)
+
+Add to your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 # Claude Code with auto session logging
-claude-session() {
-    # Start session
-    python ~/workspace/obsidian_vault/docs/03_project/00_thedomainai/cli-session-log/hooks/claude_session_hook.py start "$1"
+# Replace /path/to/cli-session-log with your actual installation path
 
-    # Run Claude Code
-    claude "$@"
-
-    # End session
-    python ~/workspace/obsidian_vault/docs/03_project/00_thedomainai/cli-session-log/hooks/claude_session_hook.py stop
+claude() {
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py start "Claude Session"
+    command claude "$@"
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py stop
 }
 
-alias cs='claude-session'
+gemini() {
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py start "Gemini Session"
+    command gemini "$@"
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py stop
+}
 ```
 
-### 2. Claude Code Settings（セッション終了を自動化）
+Then reload your shell:
+```bash
+source ~/.zshrc  # or source ~/.bashrc
+```
 
-`~/.claude/settings.json` に追加:
+### 2. Claude Code Settings (Alternative: Hook-based Stop)
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -35,7 +43,7 @@ alias cs='claude-session'
         "hooks": [
           {
             "type": "command",
-            "command": "python ~/workspace/obsidian_vault/docs/03_project/00_thedomainai/cli-session-log/hooks/claude_session_hook.py stop"
+            "command": "python3 /path/to/cli-session-log/hooks/claude_session_hook.py stop"
           }
         ]
       }
@@ -44,37 +52,43 @@ alias cs='claude-session'
 }
 ```
 
-## 使い方
+## Usage
 
-### 自動セッション管理
-
-```bash
-# エイリアスを使用（推奨）
-cs "今日のタスク"
-
-# セッションが自動で開始・終了される
-```
-
-### 手動操作
+### Automatic Session Management
 
 ```bash
-# セッション開始
-python hooks/claude_session_hook.py start "セッション名"
+# Just use claude or gemini as usual
+claude
+gemini
 
-# 現在のセッション確認
-python hooks/claude_session_hook.py current
-
-# ログ追加
-python hooks/claude_session_hook.py log User "質問内容"
-python hooks/claude_session_hook.py log AI "回答内容"
-
-# セッション終了
-python hooks/claude_session_hook.py stop
+# Sessions are automatically started and stopped
 ```
 
-## 保存先
+### Manual Operations
 
-セッションは以下に保存されます:
+```bash
+# Start session
+python3 hooks/claude_session_hook.py start "Session Title"
+
+# Check current session
+python3 hooks/claude_session_hook.py current
+
+# Add log entry
+python3 hooks/claude_session_hook.py log User "User message"
+python3 hooks/claude_session_hook.py log AI "AI response"
+
+# Stop session
+python3 hooks/claude_session_hook.py stop
 ```
-~/workspace/obsidian_vault/docs/01_resource/sessions/YYYY-MM/session-XXXXXXXX.md
+
+## Session Storage
+
+Sessions are stored in your configured sessions directory:
+```
+~/.local/share/cli-session-log/sessions/YYYY-MM/session-XXXXXXXX.md
+```
+
+You can customize the sessions directory in `~/.config/cli-session-log/config.yaml`:
+```yaml
+sessions_dir: ~/path/to/your/sessions
 ```

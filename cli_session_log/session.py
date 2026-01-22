@@ -6,23 +6,27 @@ import secrets
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal, Optional
+from typing import Any, Iterator, Optional
 
+import yaml
 from filelock import FileLock, Timeout
-
-try:
-    import yaml
-except ImportError:
-    raise ImportError("Missing dependency: pyyaml. Install with: pip install pyyaml")
 
 from .constants import (
     DATETIME_FORMAT,
     LOCK_TIMEOUT_SECONDS,
+    MAX_MESSAGE_LENGTH,
+    MAX_SESSION_FILE_SIZE,
+    MAX_TASK_TEXT_LENGTH,
+    MAX_TITLE_LENGTH,
     MESSAGE_HASH_LENGTH,
     MONTH_DIR_FORMAT,
     SESSION_FILE_VERSION,
     SESSION_ID_LENGTH,
+    SessionStatus,
     STATUS_ACTIVE,
+    TASK_PATTERN_ALL,
+    TASK_PATTERN_INCOMPLETE,
+    TASK_SECTION_PATTERN,
     VALID_STATUSES,
 )
 from .exceptions import (
@@ -33,9 +37,6 @@ from .exceptions import (
 from .logging_config import get_logger
 
 logger = get_logger("session")
-
-# Type aliases
-SessionStatus = Literal["active", "paused", "completed"]
 
 
 def now_iso() -> str:
@@ -230,6 +231,12 @@ class SessionManager:
         """
         session_id = generate_session_id()
         title = title or f"Session {session_id}"
+
+        # Validate title length
+        if len(title) > MAX_TITLE_LENGTH:
+            logger.warning("Title truncated from %d to %d characters", len(title), MAX_TITLE_LENGTH)
+            title = title[:MAX_TITLE_LENGTH]
+
         now = now_iso()
 
         frontmatter: dict[str, Any] = {
@@ -292,6 +299,16 @@ class SessionManager:
         if not session_file:
             raise SessionNotFoundError(session_id)
 
+        # Validate message length
+        if len(message) > MAX_MESSAGE_LENGTH:
+            logger.warning("Message truncated from %d to %d characters", len(message), MAX_MESSAGE_LENGTH)
+            message = message[:MAX_MESSAGE_LENGTH] + "... [truncated]"
+
+        # Validate role
+        if role not in ("User", "AI"):
+            logger.warning("Invalid role '%s', defaulting to 'User'", role)
+            role = "User"
+
         with self._lock_session(session_file):
             try:
                 content = session_file.read_text(encoding="utf-8")
@@ -336,7 +353,15 @@ class SessionManager:
         Raises:
             SessionNotFoundError: If session not found
             SessionWriteError: If file cannot be written
+            ValueError: If task text is empty or too long
         """
+        # Validate task text
+        if not task_text or not task_text.strip():
+            raise ValueError("Task text cannot be empty")
+        if len(task_text) > MAX_TASK_TEXT_LENGTH:
+            logger.warning("Task text truncated from %d to %d characters", len(task_text), MAX_TASK_TEXT_LENGTH)
+            task_text = task_text[:MAX_TASK_TEXT_LENGTH]
+
         session_file = self.find_session(session_id)
         if not session_file:
             raise SessionNotFoundError(session_id)
@@ -352,7 +377,7 @@ class SessionManager:
             task_line = f"- [ ] {task_text}\n"
 
             # Find the Tasks section and append at the end of existing tasks
-            tasks_section_match = re.search(r"## Tasks\n((?:- \[[ x]\] [^\n]*\n)*)", body)
+            tasks_section_match = re.search(TASK_SECTION_PATTERN, body)
             if tasks_section_match:
                 # Insert after existing tasks
                 insert_pos = tasks_section_match.end()
@@ -398,7 +423,7 @@ class SessionManager:
             found = False
 
             for i, line in enumerate(lines):
-                if re.match(r"^- \[ \] ", line):
+                if re.match(TASK_PATTERN_INCOMPLETE, line):
                     task_count += 1
                     if task_count == task_num:
                         lines[i] = line.replace("- [ ] ", "- [x] ", 1)
@@ -440,10 +465,10 @@ class SessionManager:
         tasks: list[dict[str, Any]] = []
         task_num = 0
         for line in body.split("\n"):
-            if re.match(r"^- \[[ x]\] ", line):
+            if re.match(TASK_PATTERN_ALL, line):
                 task_num += 1
                 done = "[x]" in line
-                text = re.sub(r"^- \[[ x]\] ", "", line)
+                text = re.sub(TASK_PATTERN_ALL, "", line)
                 tasks.append({"num": task_num, "done": done, "text": text})
 
         return tasks
@@ -522,10 +547,19 @@ class SessionManager:
 
         Raises:
             SessionNotFoundError: If session not found
+            SessionParseError: If file is too large
         """
         session_file = self.find_session(session_id)
         if not session_file:
             raise SessionNotFoundError(session_id)
+
+        # Check file size before reading
+        file_size = session_file.stat().st_size
+        if file_size > MAX_SESSION_FILE_SIZE:
+            raise SessionParseError(
+                f"Session file too large ({file_size:,} bytes > {MAX_SESSION_FILE_SIZE:,} bytes)",
+                path=str(session_file)
+            )
 
         return session_file.read_text(encoding="utf-8")
 
@@ -543,10 +577,18 @@ class SessionManager:
             raise SessionNotFoundError(session_id)
 
         with self._lock_session(session_file):
-            content = session_file.read_text(encoding="utf-8")
+            try:
+                content = session_file.read_text(encoding="utf-8")
+            except OSError as e:
+                raise SessionWriteError(f"Failed to read session: {e}", path=str(session_file))
+
             fm, body = parse_frontmatter(content)
             fm["imported_hashes"] = []
             fm["updated_at"] = now_iso()
             content = serialize_frontmatter(fm, body)
-            session_file.write_text(content, encoding="utf-8")
-            logger.info("Cleared imported hashes for session %s", session_id)
+
+            try:
+                session_file.write_text(content, encoding="utf-8")
+                logger.info("Cleared imported hashes for session %s", session_id)
+            except OSError as e:
+                raise SessionWriteError(f"Failed to write session: {e}", path=str(session_file))

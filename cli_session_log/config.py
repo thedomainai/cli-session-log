@@ -4,10 +4,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
+import yaml
 
 from .exceptions import PathTraversalError
 from .logging_config import get_logger
@@ -34,6 +31,9 @@ def validate_path(path: Path, allowed_bases: Optional[list[Path]] = None) -> Pat
     # Check for suspicious patterns in original path string
     path_str = str(path)
     if ".." in path_str:
+        # If no allowed_bases specified, reject paths with traversal sequences
+        if not allowed_bases:
+            raise PathTraversalError(str(path), "no base directories allowed")
         logger.warning("Path contains traversal sequence: %s", path)
 
     # If allowed_bases specified, verify path is under one of them
@@ -97,10 +97,6 @@ class Config:
         """Load configuration from file."""
         if not self.CONFIG_FILE.exists():
             logger.debug("Config file not found: %s", self.CONFIG_FILE)
-            return
-
-        if yaml is None:
-            logger.warning("PyYAML not installed, skipping config file")
             return
 
         try:
@@ -176,21 +172,43 @@ class Config:
         """Ensure sessions directory exists."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_session_state_file(self, ai_type: str, cwd: str) -> Path:
-        """Get state file path for a specific AI type and working directory.
+    def get_terminal_id(self) -> Optional[str]:
+        """Get terminal ID from environment variable.
+
+        Returns:
+            Terminal ID if available, None otherwise
+        """
+        return os.environ.get("CURSOR_TERMINAL_ID")
+
+    def get_session_state_file(self, ai_type: str, cwd: str, terminal_id: Optional[str] = None) -> Path:
+        """Get state file path for a specific AI type and terminal/directory.
+
+        Priority:
+        1. terminal_id parameter (if provided)
+        2. CURSOR_TERMINAL_ID environment variable
+        3. Fallback to cwd-based (for non-Cursor environments)
 
         Args:
             ai_type: AI type (claude/gemini)
-            cwd: Working directory path
+            cwd: Working directory path (used as fallback)
+            terminal_id: Optional terminal ID override
 
         Returns:
             Path to the session state file
         """
-        # Create a safe filename from cwd
-        safe_cwd = cwd.replace("/", "_").replace("\\", "_").strip("_")
-        if not safe_cwd:
-            safe_cwd = "default"
-        return self.STATE_DIR / f"{ai_type}_{safe_cwd}.json"
+        # Priority 1: explicit terminal_id parameter
+        # Priority 2: CURSOR_TERMINAL_ID environment variable
+        tid = terminal_id or self.get_terminal_id()
+
+        if tid:
+            # Terminal ID based (preferred - supports multiple terminals in same dir)
+            return self.STATE_DIR / f"{tid}_{ai_type}.json"
+        else:
+            # Fallback: cwd-based (for non-Cursor environments)
+            safe_cwd = cwd.replace("/", "_").replace("\\", "_").strip("_")
+            if not safe_cwd:
+                safe_cwd = "default"
+            return self.STATE_DIR / f"{ai_type}_{safe_cwd}.json"
 
     def get_ai_type_state_file(self, ai_type: str) -> Path:
         """Get the state file for a specific AI type (legacy compatibility).
@@ -215,8 +233,40 @@ class Config:
         if not self.STATE_DIR.exists():
             return []
 
-        pattern = f"{ai_type}_*.json" if ai_type else "*.json"
-        return list(self.STATE_DIR.glob(pattern))
+        if ai_type:
+            # Match both terminal-based ({terminal_id}_{ai_type}.json)
+            # and cwd-based ({ai_type}_{safe_cwd}.json) patterns
+            terminal_pattern = f"*_{ai_type}.json"
+            cwd_pattern = f"{ai_type}_*.json"
+            files = set(self.STATE_DIR.glob(terminal_pattern))
+            files.update(self.STATE_DIR.glob(cwd_pattern))
+            return list(files)
+        else:
+            return list(self.STATE_DIR.glob("*.json"))
+
+    def find_session_by_terminal_id(self, terminal_id: str, ai_type: Optional[str] = None) -> Optional[Path]:
+        """Find session state file by terminal ID.
+
+        Args:
+            terminal_id: Terminal ID to search for
+            ai_type: Optional AI type filter
+
+        Returns:
+            Path to session state file if found, None otherwise
+        """
+        if not self.STATE_DIR.exists():
+            return None
+
+        if ai_type:
+            state_file = self.STATE_DIR / f"{terminal_id}_{ai_type}.json"
+            return state_file if state_file.exists() else None
+        else:
+            # Search for any AI type
+            for at in self.AI_TYPES:
+                state_file = self.STATE_DIR / f"{terminal_id}_{at}.json"
+                if state_file.exists():
+                    return state_file
+            return None
 
 
 # Singleton instance

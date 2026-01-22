@@ -49,15 +49,15 @@ Add shell wrapper functions to automatically record sessions when using Claude C
 # Replace /path/to/cli-session-log with your actual installation path
 
 claude() {
-    python /path/to/cli-session-log/hooks/claude_session_hook.py start "Claude Session"
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py start "Claude Session"
     command claude "$@"
-    python /path/to/cli-session-log/hooks/claude_session_hook.py stop
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py stop
 }
 
 gemini() {
-    python /path/to/cli-session-log/hooks/claude_session_hook.py start "Gemini Session"
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py start "Gemini Session"
     command gemini "$@"
-    python /path/to/cli-session-log/hooks/claude_session_hook.py stop
+    python3 /path/to/cli-session-log/hooks/claude_session_hook.py stop
 }
 ```
 

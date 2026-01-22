@@ -39,9 +39,18 @@ class TestValidatePath:
             validate_path(Path("/etc/passwd"), allowed_bases=[allowed])
 
     def test_validate_path_with_dotdot(self):
-        """Test path with .. is detected (warning logged)."""
-        # This should work but log a warning
-        path = validate_path(Path.home() / "foo" / ".." / "bar")
+        """Test path with .. raises error without allowed_bases."""
+        # Without allowed_bases, paths with .. should raise PathTraversalError
+        with pytest.raises(PathTraversalError):
+            validate_path(Path.home() / "foo" / ".." / "bar")
+
+    def test_validate_path_with_dotdot_allowed(self):
+        """Test path with .. is allowed when within allowed_bases."""
+        # With allowed_bases, it should work if the resolved path is allowed
+        path = validate_path(
+            Path.home() / "foo" / ".." / "bar",
+            allowed_bases=[Path.home()]
+        )
         assert path.is_absolute()
 
 

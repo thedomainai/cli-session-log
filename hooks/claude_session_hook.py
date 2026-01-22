@@ -18,7 +18,7 @@ Usage in ~/.claude/settings.json:
         "hooks": [
           {
             "type": "command",
-            "command": "python /path/to/claude_session_hook.py stop"
+            "command": "python3 /path/to/claude_session_hook.py stop"
           }
         ]
       }
@@ -31,10 +31,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
+
+from filelock import FileLock
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -63,13 +66,18 @@ class SessionState:
     cwd: str
     start_timestamp: str
     title: Optional[str] = None
+    terminal_id: Optional[str] = None  # Cursor terminal ID for multi-terminal support
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
 
     @classmethod
     def from_json(cls, data: str) -> "SessionState":
-        return cls(**json.loads(data))
+        parsed = json.loads(data)
+        # Handle legacy state files without terminal_id
+        if "terminal_id" not in parsed:
+            parsed["terminal_id"] = None
+        return cls(**parsed)
 
 
 def ensure_state_dir():
@@ -83,17 +91,35 @@ def get_current_cwd() -> str:
     return os.getcwd()
 
 
-def get_session_state(ai_type: str, cwd: str) -> Optional[SessionState]:
-    """Get session state for a specific AI type and cwd.
+def get_terminal_id() -> Optional[str]:
+    """Get terminal ID from environment variable.
+
+    Returns:
+        Terminal ID if available (set by Cursor terminal-id extension), None otherwise
+    """
+    return os.environ.get("CURSOR_TERMINAL_ID")
+
+
+def get_session_state(ai_type: str, cwd: str, terminal_id: Optional[str] = None) -> Optional[SessionState]:
+    """Get session state for a specific AI type and terminal/cwd.
+
+    Priority:
+    1. terminal_id parameter (if provided)
+    2. CURSOR_TERMINAL_ID environment variable
+    3. Fallback to cwd-based lookup
 
     Args:
         ai_type: AI type (claude/gemini)
-        cwd: Working directory
+        cwd: Working directory (used as fallback)
+        terminal_id: Optional terminal ID override
 
     Returns:
         SessionState if exists, None otherwise
     """
-    state_file = config.get_session_state_file(ai_type, cwd)
+    # Use provided terminal_id or get from environment
+    tid = terminal_id or get_terminal_id()
+
+    state_file = config.get_session_state_file(ai_type, cwd, tid)
     if state_file.exists():
         try:
             return SessionState.from_json(state_file.read_text())
@@ -103,25 +129,41 @@ def get_session_state(ai_type: str, cwd: str) -> Optional[SessionState]:
 
 
 def set_session_state(state: SessionState) -> None:
-    """Save session state.
+    """Save session state atomically.
+
+    Uses temp file + rename pattern to ensure atomic writes.
 
     Args:
         state: SessionState to save
     """
     ensure_state_dir()
     state_file = config.get_session_state_file(state.ai_type, state.cwd)
-    state_file.write_text(state.to_json())
-    logger.debug("Saved session state to %s", state_file)
+
+    # Atomic write: temp file + rename
+    fd, tmp_path = tempfile.mkstemp(dir=state_file.parent, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(state.to_json())
+        os.replace(tmp_path, state_file)  # Atomic on POSIX
+        logger.debug("Saved session state to %s", state_file)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 
-def clear_session_state(ai_type: str, cwd: str) -> None:
-    """Clear session state for a specific AI type and cwd.
+def clear_session_state(ai_type: str, cwd: str, terminal_id: Optional[str] = None) -> None:
+    """Clear session state for a specific AI type and terminal/cwd.
 
     Args:
         ai_type: AI type (claude/gemini)
         cwd: Working directory
+        terminal_id: Optional terminal ID
     """
-    state_file = config.get_session_state_file(ai_type, cwd)
+    # Use provided terminal_id or get from environment
+    tid = terminal_id or get_terminal_id()
+
+    state_file = config.get_session_state_file(ai_type, cwd, tid)
     if state_file.exists():
         state_file.unlink()
         logger.debug("Cleared session state: %s", state_file)
@@ -143,6 +185,42 @@ def find_session_by_cwd(cwd: str) -> Optional[SessionState]:
     return None
 
 
+def find_session(cwd: Optional[str] = None, terminal_id: Optional[str] = None) -> Optional[SessionState]:
+    """Find active session by terminal ID or cwd.
+
+    Priority:
+    1. terminal_id parameter
+    2. CURSOR_TERMINAL_ID environment variable
+    3. cwd-based lookup (fallback)
+
+    Args:
+        cwd: Working directory (optional, defaults to current cwd)
+        terminal_id: Terminal ID (optional, defaults to CURSOR_TERMINAL_ID env var)
+
+    Returns:
+        SessionState if found, None otherwise
+    """
+    cwd = cwd or get_current_cwd()
+    tid = terminal_id or get_terminal_id()
+
+    # Try to find by terminal ID first (if available)
+    if tid:
+        for ai_type in config.AI_TYPES:
+            state = get_session_state(ai_type, cwd, tid)
+            if state:
+                logger.debug("Found session by terminal_id: %s", tid)
+                return state
+
+    # Fallback to cwd-based lookup (for non-Cursor environments or legacy)
+    for ai_type in config.AI_TYPES:
+        state = get_session_state(ai_type, cwd, terminal_id=None)
+        if state:
+            logger.debug("Found session by cwd: %s", cwd)
+            return state
+
+    return None
+
+
 def list_all_active_sessions() -> list[SessionState]:
     """List all active sessions across all AI types.
 
@@ -157,6 +235,37 @@ def list_all_active_sessions() -> list[SessionState]:
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning("Failed to parse state file %s: %s", state_file, e)
     return sessions
+
+
+def cleanup_stale_sessions(max_age_hours: int = 24) -> int:
+    """Remove state files older than max_age_hours.
+
+    This helps clean up orphaned sessions from crashes or abnormal exits.
+
+    Args:
+        max_age_hours: Maximum age in hours before a session is considered stale
+
+    Returns:
+        Number of stale sessions removed
+    """
+    removed = 0
+    for state_file in config.list_active_sessions():
+        try:
+            state = SessionState.from_json(state_file.read_text())
+            start_time = datetime.fromisoformat(state.start_timestamp)
+            if datetime.now() - start_time > timedelta(hours=max_age_hours):
+                logger.warning("Removing stale session: %s (started %s)", state.session_id, state.start_timestamp)
+                state_file.unlink()
+                removed += 1
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            # Corrupt state file - remove it
+            logger.warning("Removing corrupt state file %s: %s", state_file, e)
+            try:
+                state_file.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 # Legacy compatibility functions
@@ -211,10 +320,15 @@ def cmd_start(title: Optional[str] = None, ai_type: Optional[str] = None) -> Opt
     Supports parallel sessions:
     - Different AI types (Claude/Gemini) can run simultaneously
     - Same AI type in different directories can run simultaneously
-    - Same AI type in same directory will reuse existing session
+    - Same AI type in same terminal will reuse existing session
+    - Multiple terminals in the same directory are correctly distinguished
+
+    Uses file locking to prevent race conditions when multiple processes
+    try to start sessions simultaneously.
     """
     manager = SessionManager(config.sessions_dir)
     cwd = get_current_cwd()
+    terminal_id = get_terminal_id()
 
     # Detect AI type from title if not specified
     if not ai_type and title:
@@ -226,32 +340,47 @@ def cmd_start(title: Optional[str] = None, ai_type: Optional[str] = None) -> Opt
 
     ai_type = ai_type or AI_TYPE_CLAUDE  # Default to claude
 
-    # Check if there's already an active session for this AI type and cwd
-    existing_state = get_session_state(ai_type, cwd)
-    if existing_state:
-        logger.info("Session already active for %s in %s: %s", ai_type, cwd, existing_state.session_id)
-        print(f"Session already active: {existing_state.session_id} ({ai_type})")
-        return existing_state.session_id
+    # Clean up stale sessions before checking (prevents zombie sessions)
+    cleanup_stale_sessions()
 
-    # Create new session
-    title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime(DATETIME_FORMAT)}"
+    # Use file lock to prevent race condition (TOCTOU)
+    ensure_state_dir()
+    state_file = config.get_session_state_file(ai_type, cwd, terminal_id)
+    lock_file = state_file.with_suffix('.lock')
+    lock = FileLock(lock_file, timeout=5)
 
     try:
-        session_id, session_file = manager.create_session(title)
+        with lock:
+            # Check if there's already an active session for this AI type and terminal/cwd
+            existing_state = get_session_state(ai_type, cwd, terminal_id)
+            if existing_state:
+                logger.info("Session already active for %s (terminal=%s, cwd=%s): %s",
+                           ai_type, terminal_id, cwd, existing_state.session_id)
+                print(f"Session already active: {existing_state.session_id} ({ai_type})")
+                return existing_state.session_id
 
-        # Save session state with cwd
-        state = SessionState(
-            session_id=session_id,
-            ai_type=ai_type,
-            cwd=cwd,
-            start_timestamp=datetime.now().isoformat(),
-            title=title
-        )
-        set_session_state(state)
+            # Create new session
+            title = title or f"{ai_type.capitalize()} Session - {datetime.now().strftime(DATETIME_FORMAT)}"
 
-        logger.info("Started session: %s (%s) in %s", session_id, ai_type, cwd)
-        print(f"Session started: {session_id} ({ai_type})")
-        return session_id
+            session_id, session_file = manager.create_session(title)
+
+            # Save session state with terminal_id and cwd
+            state = SessionState(
+                session_id=session_id,
+                ai_type=ai_type,
+                cwd=cwd,
+                start_timestamp=datetime.now().isoformat(),
+                title=title,
+                terminal_id=terminal_id
+            )
+            set_session_state(state)
+
+            if terminal_id:
+                logger.info("Started session: %s (%s) terminal=%s cwd=%s", session_id, ai_type, terminal_id, cwd)
+            else:
+                logger.info("Started session: %s (%s) in %s (no terminal_id)", session_id, ai_type, cwd)
+            print(f"Session started: {session_id} ({ai_type})")
+            return session_id
     except SessionWriteError as e:
         logger.error("Failed to create session: %s", e)
         print(f"Error: {e}", file=sys.stderr)
@@ -383,16 +512,17 @@ def import_claude_conversation(manager: SessionManager, session_id: str, cwd: Op
 def cmd_stop(ai_type_arg: Optional[str] = None):
     """Stop the current session, import conversation, and extract tasks.
 
-    Uses cwd to identify the correct session to stop.
+    Uses terminal_id (if available) or cwd to identify the correct session to stop.
 
     Args:
         ai_type_arg: Optional AI type override
     """
     manager = SessionManager(config.sessions_dir)
     cwd = get_current_cwd()
+    terminal_id = get_terminal_id()
 
-    # Find session by cwd
-    state = find_session_by_cwd(cwd)
+    # Find session by terminal_id or cwd
+    state = find_session(cwd, terminal_id)
 
     if not state:
         # Legacy fallback
@@ -401,7 +531,7 @@ def cmd_stop(ai_type_arg: Optional[str] = None):
             current_id = config.STATE_FILE.read_text().strip() or None
 
         if not current_id:
-            logger.warning("No active session to stop in %s", cwd)
+            logger.warning("No active session to stop (terminal=%s, cwd=%s)", terminal_id, cwd)
             print(f"No active session in {cwd}", file=sys.stderr)
             return
 
@@ -411,8 +541,9 @@ def cmd_stop(ai_type_arg: Optional[str] = None):
         current_id = state.session_id
         ai_type = ai_type_arg or state.ai_type
         cwd = state.cwd  # Use stored cwd
+        terminal_id = state.terminal_id  # Use stored terminal_id
 
-    logger.info("Stopping session: %s (%s) in %s", current_id, ai_type, cwd)
+    logger.info("Stopping session: %s (%s) terminal=%s cwd=%s", current_id, ai_type, terminal_id, cwd)
 
     try:
         # Import conversation based on AI type, using cwd
@@ -437,7 +568,7 @@ def cmd_stop(ai_type_arg: Optional[str] = None):
     finally:
         # Clear session state
         if state:
-            clear_session_state(state.ai_type, state.cwd)
+            clear_session_state(state.ai_type, state.cwd, state.terminal_id)
         else:
             # Legacy cleanup
             if config.STATE_FILE.exists():
@@ -466,12 +597,16 @@ def cmd_log(role: str, message: str):
 
 
 def cmd_current():
-    """Show current session for this working directory."""
+    """Show current session for this terminal/working directory."""
     cwd = get_current_cwd()
-    state = find_session_by_cwd(cwd)
+    terminal_id = get_terminal_id()
+    state = find_session(cwd, terminal_id)
 
     if state:
-        print(f"{state.session_id} ({state.ai_type})")
+        if state.terminal_id:
+            print(f"{state.session_id} ({state.ai_type}) [terminal={state.terminal_id[:8]}]")
+        else:
+            print(f"{state.session_id} ({state.ai_type})")
     else:
         # Legacy fallback
         current_id = get_current_session_id()
@@ -479,7 +614,7 @@ def cmd_current():
             ai_type = get_ai_type() or "unknown"
             print(f"{current_id} ({ai_type}) [legacy]")
         else:
-            print(f"No active session in {cwd}", file=sys.stderr)
+            print(f"No active session (terminal={terminal_id}, cwd={cwd})", file=sys.stderr)
             sys.exit(1)
 
 
@@ -493,15 +628,25 @@ def cmd_list():
 
     print(f"Active sessions ({len(sessions)}):")
     for s in sessions:
-        print(f"  {s.session_id} ({s.ai_type}) - {s.cwd}")
+        terminal_info = f" [terminal={s.terminal_id[:8]}]" if s.terminal_id else ""
+        print(f"  {s.session_id} ({s.ai_type}){terminal_info} - {s.cwd}")
         if s.title:
             print(f"    Title: {s.title}")
         print(f"    Started: {s.start_timestamp}")
 
 
+def cmd_cleanup(max_age_hours: int = 24):
+    """Clean up stale session state files."""
+    removed = cleanup_stale_sessions(max_age_hours)
+    if removed:
+        print(f"Removed {removed} stale session(s)")
+    else:
+        print("No stale sessions found")
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: claude_session_hook.py <start|stop|log|current|list> [args]", file=sys.stderr)
+        print("Usage: claude_session_hook.py <start|stop|log|current|list|cleanup> [args]", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -523,6 +668,9 @@ def main():
         cmd_current()
     elif cmd == "list":
         cmd_list()
+    elif cmd == "cleanup":
+        max_age = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+        cmd_cleanup(max_age)
     else:
         logger.error("Unknown command: %s", cmd)
         print(f"Unknown command: {cmd}", file=sys.stderr)

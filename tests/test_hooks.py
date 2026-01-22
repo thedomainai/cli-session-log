@@ -61,7 +61,9 @@ def create_mock_config(tmpdir: Path) -> MagicMock:
     def ensure_state_dir():
         mock_conf.STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def get_session_state_file(ai_type: str, cwd: str) -> Path:
+    def get_session_state_file(ai_type: str, cwd: str, terminal_id: Optional[str] = None) -> Path:
+        if terminal_id:
+            return mock_conf.STATE_DIR / f"{terminal_id}_{ai_type}.json"
         safe_cwd = cwd.replace("/", "_").replace("\\", "_").strip("_")
         if not safe_cwd:
             safe_cwd = "default"
